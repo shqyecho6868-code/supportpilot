@@ -88,7 +88,7 @@ class TaskJudge:
         transcript = "\n".join(f"{m['role']}: {m['content']}" for m in history)
         tools = [
             f"- {t['name']}({json.dumps(t['args'])}) -> "
-            f"{'ERROR' if t['is_error'] else 'ok'}: {t['result'][:2000]}"
+            f"{'ERROR' if t['is_error'] else 'ok'}: {t['result'][:8000]}"
             for t in record["tools"]
         ]
         events = []

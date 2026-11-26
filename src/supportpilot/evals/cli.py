@@ -7,8 +7,10 @@
                                                # of more than 5 points re-run once, exit 1 only if
                                                # the same metric regresses in both runs
 
-Needs the compose stack and ANTHROPIC_API_KEY. The model under test defaults to Claude Haiku;
-the judge and Ragas default to Claude Sonnet, so a stronger model grades the weaker one.
+Needs the compose stack and ANTHROPIC_API_KEY. The model under test and, for routine runs, the
+judge and Ragas default to Claude Haiku. The one-off deep evaluation is graded by Sonnet:
+
+    uv run supportpilot-eval ablation --judge-model claude-sonnet-5-5
 The API no longer accepts sampling parameters (temperature), so LLM calls made by the eval
 run with thinking off and low effort for the most stable output available; LLM-graded
 metrics still vary a little run to run.
@@ -43,7 +45,10 @@ from supportpilot.llm.anthropic_llm import AnthropicLLM
 log = logging.getLogger("supportpilot.evals")
 
 DEFAULT_MODEL = "claude-haiku-5-5"  # model under test
-DEFAULT_JUDGE_MODEL = "claude-sonnet-5-5"  # a stronger model grades the weaker one
+# Routine runs (baseline / compare / CI) are graded by Haiku to keep them cheap. The one-off deep
+# evaluation passes --judge-model claude-sonnet-5-5 so a stronger model grades the weaker one;
+# its results live in evals/baseline-deep.json and are never compared against Haiku-graded runs.
+DEFAULT_JUDGE_MODEL = "claude-haiku-5-5"
 EVAL_REDIS_DB = 14
 
 # Ablation tiers: each adds one stage to the previous one. "bm25_only" is a diagnostic row.
@@ -350,7 +355,13 @@ async def cmd_compare(args, settings: Settings) -> int:
         return 2
     baseline = json.loads(BASELINE_FILE.read_text())
     if baseline["models"]["agent"] != args.model or baseline["models"]["judge"] != args.judge_model:
-        print(f"warning: baseline was produced with {baseline['models']}", file=sys.stderr)
+        # Scores from different graders are not comparable (Sonnet grades ~3 points stricter).
+        print(
+            f"baseline was produced with agent={baseline['models']['agent']} "
+            f"judge={baseline['models']['judge']}; pass the same --model / --judge-model",
+            file=sys.stderr,
+        )
+        return 2
 
     result = await full_eval(args, settings)
     _save_run(result, "latest")

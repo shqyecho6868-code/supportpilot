@@ -8,7 +8,8 @@
 Python 3.12 + uv, FastAPI (async, SSE), LangGraph with the Postgres checkpointer, official MCP Python SDK
 (v2: `mcp.server.mcpserver.MCPServer`, `mcp.Client`), ParadeDB (Postgres + pg_search + pgvector), Redis,
 pytest. The only model provider is Claude via the official `anthropic` SDK; the main model is Haiku
-(`claude-haiku-5-5`); evaluation is graded by Sonnet (`claude-sonnet-5-5`), and the key comes from `ANTHROPIC_API_KEY`.
+(`claude-haiku-5-5`); routine evaluation is graded by Haiku and the one-off deep evaluation by Sonnet
+(`claude-sonnet-5-5`), and the key comes from `ANTHROPIC_API_KEY`.
 
 ## Commands
 ```bash

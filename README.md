@@ -95,8 +95,13 @@ uv run pytest -m live             # the same scenarios against real Claude (need
 uv run supportpilot-eval ablation   # retrieval ablation -> evals/results/ablation.json
 uv run supportpilot-eval run        # full eval with the configured pipeline
 uv run supportpilot-eval baseline   # full eval, then write evals/baseline.json
-uv run supportpilot-eval compare    # full eval vs. baseline; exits 1 if any metric drops > 5 points
+uv run supportpilot-eval compare    # full eval vs. baseline; a drop > 5 points re-runs once and
+                                    # exits 1 only if the same metric drops in both runs
+uv run supportpilot-eval ablation --judge-model claude-sonnet-5-5   # one-off deep evaluation
 ```
+
+Routine runs (and CI) are graded by Haiku against `evals/baseline.json`; the one-off deep
+evaluation is graded by Sonnet and recorded in `evals/baseline-deep.json`.
 
 ## Roadmap
 

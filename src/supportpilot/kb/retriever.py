@@ -108,7 +108,7 @@ class Retriever:
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 f"SELECT {_COLUMNS}, 1 - ({column} <=> %s::vector) AS score "
-                f"FROM kb_chunks ORDER BY {column} <=> %s::vector LIMIT %s",
+                f"FROM kb_chunks ORDER BY {column} <=> %s::vector, id LIMIT %s",
                 (literal, literal, cfg.candidates),
             )
             return await cur.fetchall()
@@ -122,7 +122,7 @@ class Retriever:
                 # so free text is safe here: there is no query syntax to inject.
                 cur = await conn.execute(
                     f"SELECT {_COLUMNS}, pdb.score(id) AS score FROM kb_chunks "
-                    f"WHERE {column} ||| %s ORDER BY score DESC LIMIT %s",
+                    f"WHERE {column} ||| %s ORDER BY score DESC, id LIMIT %s",
                     (query, cfg.candidates),
                 )
             else:
@@ -131,7 +131,7 @@ class Retriever:
                     f"FROM kb_chunks, "
                     f"to_tsquery('english', array_to_string(tsvector_to_array(to_tsvector('english', %s)),"
                     f" ' | ')) AS q "
-                    f"WHERE to_tsvector('english', {column}) @@ q ORDER BY score DESC LIMIT %s",
+                    f"WHERE to_tsvector('english', {column}) @@ q ORDER BY score DESC, id LIMIT %s",
                     (query, cfg.candidates),
                 )
             return await cur.fetchall()
