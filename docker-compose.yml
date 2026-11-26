@@ -1,0 +1,38 @@
+services:
+  postgres:
+    # ParadeDB = Postgres + pg_search (BM25) + pgvector, needed by later retrieval work.
+    image: paradedb/paradedb:0.27.0-pg17
+    container_name: supportpilot-postgres
+    environment:
+      POSTGRES_USER: supportpilot
+      POSTGRES_PASSWORD: supportpilot
+      POSTGRES_DB: supportpilot
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init/01_schema.sql:/docker-entrypoint-initdb.d/90_supportpilot_schema.sql:ro
+      - ./db/init/02_seed.sql:/docker-entrypoint-initdb.d/91_supportpilot_seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supportpilot -d supportpilot"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: supportpilot-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:
+  redisdata:

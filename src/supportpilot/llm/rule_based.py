@@ -1,0 +1,113 @@
+"""Deterministic, offline stand-in for Claude.
+
+This is a test double, not a model: it maps a few fixed phrasings to tool calls
+so the graph, MCP tools, confirmation flow and restart recovery can be tested
+end to end without network access or API cost. Production uses ``AnthropicLLM``.
+"""
+
+import json
+import re
+import uuid
+from typing import Any
+
+from supportpilot.llm.base import Intent, LLMTurn, TextCallback
+
+_ORDER_ID = re.compile(r"\bORD-\d{4}\b", re.IGNORECASE)
+_ADDRESS = re.compile(
+    r"\bto\s+(?P<street>[^,]+),\s*(?P<city>[^,]+),\s*(?P<state>[A-Za-z]{2})\s+(?P<postal_code>[\w-]+)"
+    r"(?:,\s*(?P<country>[A-Za-z]{2}))?",
+    re.IGNORECASE,
+)
+_HANDOFF = re.compile(r"\b(human|real person|representative|live agent|speak to (an )?agent)\b", re.I)
+_KNOWLEDGE = re.compile(
+    r"\b(policy|policies|return window|refund policy|warranty|how long does shipping)\b", re.I
+)
+
+
+def _text_of(message: dict[str, Any]) -> str:
+    content = message["content"]
+    if isinstance(content, str):
+        return content
+    return " ".join(b.get("text", "") for b in content if b.get("type") == "text")
+
+
+def _emit(text: str, on_text: TextCallback) -> LLMTurn:
+    for word in text.split(" "):
+        on_text(word + " ")
+    return LLMTurn(content=[{"type": "text", "text": text}], stop_reason="end_turn")
+
+
+def _tool_call(name: str, args: dict[str, Any]) -> LLMTurn:
+    block = {"type": "tool_use", "id": f"toolu_{uuid.uuid4().hex[:12]}", "name": name, "input": args}
+    return LLMTurn(content=[block], stop_reason="tool_use")
+
+
+class RuleBasedLLM:
+    async def classify_intent(self, system: str, messages: list[dict[str, Any]]) -> Intent:
+        text = _text_of(messages[-1])
+        if _HANDOFF.search(text):
+            return "handoff"
+        if _KNOWLEDGE.search(text):
+            return "knowledge"
+        return "order"
+
+    async def respond(
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        on_text: TextCallback,
+    ) -> LLMTurn:
+        last = messages[-1]
+        if isinstance(last["content"], list) and any(b.get("type") == "tool_result" for b in last["content"]):
+            return _emit(self._summarize(messages), on_text)
+
+        text = _text_of(last)
+        order_match = _ORDER_ID.search(text)
+        address_match = _ADDRESS.search(text)
+        if order_match and address_match and "address" in text.lower():
+            parts = address_match.groupdict()
+            return _tool_call(
+                "update_address",
+                {
+                    "order_id": order_match.group(0).upper(),
+                    "street": parts["street"].strip(),
+                    "city": parts["city"].strip(),
+                    "state": parts["state"].upper(),
+                    "postal_code": parts["postal_code"],
+                    "country": (parts["country"] or "US").upper(),
+                },
+            )
+        if order_match:
+            return _tool_call("get_order", {"order_id": order_match.group(0).upper()})
+        if "orders" in text.lower():
+            return _tool_call("list_my_orders", {})
+        return _emit("I can help you track orders or update a pending order's shipping address.", on_text)
+
+    @staticmethod
+    def _summarize(messages: list[dict[str, Any]]) -> str:
+        names = {b["id"]: b["name"] for b in messages[-2]["content"] if b.get("type") == "tool_use"}
+        lines = []
+        for block in messages[-1]["content"]:
+            if block.get("type") != "tool_result":
+                continue
+            raw = block["content"] if isinstance(block["content"], str) else block["content"][0]["text"]
+            name = names.get(block["tool_use_id"], "")
+            if block.get("is_error"):
+                lines.append(f"Sorry, I couldn't complete that: {raw}")
+                continue
+            data = json.loads(raw)
+            if name == "update_address":
+                a = data["new_address"]
+                lines.append(
+                    f"Done. The shipping address for {data['order_id']} is now "
+                    f"{a['street']}, {a['city']}, {a['state']} {a['postal_code']}, {a['country']}."
+                )
+            elif name == "get_order":
+                lines.append(f"Order {data['order_id']} is {data['status']}.")
+            elif name == "list_my_orders":
+                summary = ", ".join(f"{o['order_id']} ({o['status']})" for o in data["orders"])
+                lines.append(f"Your orders: {summary}.")
+            else:
+                lines.append("Done.")
+        return " ".join(lines)

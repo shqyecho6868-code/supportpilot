@@ -1,0 +1,213 @@
+"""End-to-end flows through FastAPI -> LangGraph -> MCP -> Postgres/Redis.
+
+Uses the deterministic RuleBasedLLM so the flows are reproducible offline.
+The same scenarios against real Claude live in tests/test_live_claude.py.
+"""
+
+import psycopg
+
+from tests.conftest import ALICE, BOB, TEST_DATABASE_URL, chat, confirm, fetch_order
+
+CHANGE_1001 = "Please change the shipping address of ORD-1001 to 500 Market St, San Francisco, CA 94105, US"
+NEW_1001 = {
+    "street": "500 Market St",
+    "city": "San Francisco",
+    "state": "CA",
+    "postal_code": "94105",
+    "country": "US",
+}
+
+
+# --- Verification 1: confirmation gate + idempotency --------------------------------
+
+
+async def test_address_change_pauses_for_confirmation_before_writing(client):
+    before = await fetch_order("ORD-1001")
+    turn = await chat(client, ALICE, CHANGE_1001)
+
+    assert turn["route"] == "order"
+    assert turn["confirmation"] is not None
+    assert turn["confirmation"]["order_id"] == "ORD-1001"
+    assert turn["confirmation"]["new_address"] == NEW_1001
+    assert turn["confirmation"]["current_address"] == before["address"]
+    assert "final" not in turn["names"]
+    assert await fetch_order("ORD-1001") == before  # nothing written while paused
+
+
+async def test_reject_leaves_address_unchanged(client):
+    before = await fetch_order("ORD-1001")
+    turn = await chat(client, ALICE, CHANGE_1001)
+
+    resp = await confirm(client, ALICE, turn["confirmation"]["thread_id"], "reject")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "completed"
+    assert "declined" in resp.json()["reply"]
+    assert await fetch_order("ORD-1001") == before
+
+
+async def test_never_confirming_leaves_address_unchanged(client):
+    before = await fetch_order("ORD-1001")
+    await chat(client, ALICE, CHANGE_1001)
+    # The customer walks away and starts talking about something else.
+    await chat(client, ALICE, "What is the status of ORD-1002?")
+    assert await fetch_order("ORD-1001") == before
+
+
+async def test_approve_applies_change(client):
+    turn = await chat(client, ALICE, CHANGE_1001)
+    resp = await confirm(client, ALICE, turn["confirmation"]["thread_id"], "approve")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "completed" and "San Francisco" in body["reply"]
+    row = await fetch_order("ORD-1001")
+    assert row["address"] == NEW_1001
+    assert row["address_events"] == 1
+
+
+async def test_approving_twice_changes_address_once(client):
+    turn = await chat(client, ALICE, CHANGE_1001)
+    thread_id = turn["confirmation"]["thread_id"]
+
+    first = await confirm(client, ALICE, thread_id, "approve")
+    second = await confirm(client, ALICE, thread_id, "approve")
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    row = await fetch_order("ORD-1001")
+    assert row["address"] == NEW_1001
+    assert row["address_events"] == 1
+
+
+async def test_reject_then_approve_does_not_apply(client):
+    before = await fetch_order("ORD-1001")
+    turn = await chat(client, ALICE, CHANGE_1001)
+    thread_id = turn["confirmation"]["thread_id"]
+    assert (await confirm(client, ALICE, thread_id, "reject")).status_code == 200
+    assert (await confirm(client, ALICE, thread_id, "approve")).status_code == 409
+    assert await fetch_order("ORD-1001") == before
+
+
+async def test_non_pending_order_is_refused_without_asking_for_confirmation(client):
+    before = await fetch_order("ORD-1002")
+    turn = await chat(client, ALICE, CHANGE_1001.replace("ORD-1001", "ORD-1002"))
+    assert turn["confirmation"] is None
+    assert "shipped" in turn["reply"]
+    assert await fetch_order("ORD-1002") == before
+
+
+async def test_other_user_cannot_confirm(client):
+    before = await fetch_order("ORD-1001")
+    turn = await chat(client, ALICE, CHANGE_1001)
+    resp = await confirm(client, BOB, turn["confirmation"]["thread_id"], "approve")
+    assert resp.status_code == 404
+    assert await fetch_order("ORD-1001") == before
+
+
+async def test_confirm_unknown_thread(client):
+    resp = await confirm(client, ALICE, "does-not-exist", "approve")
+    assert resp.status_code == 404
+
+
+# --- Verification 2: no cross-user access -------------------------------------------
+
+
+async def test_user_a_cannot_read_user_b_order(client):
+    turn = await chat(client, ALICE, "What's the status of order ORD-2001?")
+    assert turn["route"] == "order"
+    assert "not found on your account" in turn["reply"]
+    for secret in ("Mountain View", "Amphitheatre", "Keyboard", "pending"):
+        assert secret not in turn["reply"]
+
+
+async def test_user_a_cannot_change_user_b_address(client):
+    before = await fetch_order("ORD-2001")
+    turn = await chat(client, ALICE, CHANGE_1001.replace("ORD-1001", "ORD-2001"))
+    assert turn["confirmation"] is None
+    assert "not found on your account" in turn["reply"]
+    assert await fetch_order("ORD-2001") == before
+
+
+async def test_owner_can_read_their_order(client):
+    turn = await chat(client, BOB, "What's the status of order ORD-2001?")
+    assert "ORD-2001 is pending" in turn["reply"]
+
+
+# --- Routing -------------------------------------------------------------------------
+
+
+async def test_knowledge_route_returns_placeholder(client):
+    turn = await chat(client, ALICE, "What is your refund policy?")
+    assert turn["route"] == "knowledge"
+    assert "next release" in turn["reply"]
+
+
+async def test_handoff_route_opens_ticket(client):
+    turn = await chat(client, ALICE, "I want to talk to a human")
+    assert turn["route"] == "handoff"
+    assert "TCK-" in turn["reply"]
+    async with await psycopg.AsyncConnection.connect(TEST_DATABASE_URL) as conn:
+        (count,) = await (
+            await conn.execute("SELECT count(*) FROM tickets WHERE customer_id = %s", (ALICE,))
+        ).fetchone()
+    assert count == 1
+
+
+async def test_reply_is_streamed_as_tokens(client):
+    turn = await chat(client, ALICE, "List my orders")
+    assert turn["names"][0] == "meta" and turn["names"][-1] == "done"
+    assert turn["names"].count("token") > 1
+    assert turn["tokens"].strip() == turn["reply"]
+
+
+# --- Memory and auth -----------------------------------------------------------------
+
+
+async def test_turns_are_stored_in_short_term_memory(client):
+    from redis.asyncio import Redis
+
+    from tests.conftest import TEST_REDIS_URL
+
+    first = await chat(client, ALICE, "List my orders", session_id="s-mem")
+    await chat(client, ALICE, "What is your refund policy?", session_id="s-mem")
+    redis = Redis.from_url(TEST_REDIS_URL)
+    history = await redis.lrange("sp:session:s-mem:history", 0, -1)
+    ttl = await redis.ttl("sp:session:s-mem:history")
+    await redis.aclose()
+    assert len(history) == 4
+    assert first["reply"] in history[1].decode()
+    assert ttl > 0
+
+
+async def test_paused_turn_is_written_to_memory_after_confirmation(client):
+    from redis.asyncio import Redis
+
+    from supportpilot.memory import ConversationMemory  # noqa: F401  (documented behaviour)
+    from tests.conftest import TEST_REDIS_URL
+
+    turn = await chat(client, ALICE, CHANGE_1001, session_id="s-hitl")
+    redis = Redis.from_url(TEST_REDIS_URL)
+    assert await redis.llen("sp:session:s-hitl:history") == 0
+    await confirm(client, ALICE, turn["confirmation"]["thread_id"], "approve")
+    assert await redis.llen("sp:session:s-hitl:history") == 2
+    await redis.aclose()
+
+
+async def test_session_cannot_be_hijacked_by_another_user(client):
+    await chat(client, ALICE, "List my orders", session_id="s-owned")
+    resp = await client.post(
+        "/chat", json={"message": "List my orders", "session_id": "s-owned"}, headers={"X-User-Id": BOB}
+    )
+    assert resp.status_code == 403
+
+
+async def test_chat_requires_known_user(client):
+    assert (await client.post("/chat", json={"message": "hi"})).status_code == 401
+    resp = await client.post("/chat", json={"message": "hi"}, headers={"X-User-Id": "cust_999"})
+    assert resp.status_code == 401
+
+
+async def test_health(client):
+    resp = await client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok", "postgres": "ok", "redis": "ok", "llm_provider": "rule_based"}
