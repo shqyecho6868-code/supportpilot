@@ -43,6 +43,8 @@ async def test_a_turn_is_one_trace_with_nested_observations(exported, client):
     names = [s.name for s in spans]
     assert {"chat_turn", "guard.user_input", "router", "tool:get_order"} <= set(names)
     assert len({s.context.trace_id for s in spans}) == 1
+    # SDK-native duplicates (the MCP client's own "get_order" span) are not exported.
+    assert "get_order" not in names
     root = next(s for s in spans if s.name == "chat_turn")
     assert all(s.parent is not None for s in spans if s is not root)
     attrs = dict(root.attributes)

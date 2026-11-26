@@ -77,8 +77,17 @@ def _metered_llm_class():
                 params["thinking"] = t
             if tools:
                 params["tools"] = tools
-            response = self.client.messages.create(**params)
-            record(CallUsage.from_response(model, response.usage))
+            with get_tracer().generation(
+                "long_term_memory.extract", model=model, input=chat, model_parameters={"effort": "low"}
+            ) as gen:
+                response = self.client.messages.create(**params)
+                usage = CallUsage.from_response(model, response.usage)
+                record(usage)
+                gen.update(
+                    output="".join(getattr(b, "text", "") for b in response.content),
+                    usage_details=usage.usage_details(),
+                    cost_details=usage.cost(),
+                )
             return self._parse_response(response, tools)
 
     return MeteredAnthropicLLM

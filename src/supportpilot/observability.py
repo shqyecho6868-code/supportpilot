@@ -121,7 +121,11 @@ def configure_tracing(
         _tracer = Tracer()
         return _tracer
     from langfuse import Langfuse
+    from langfuse.span_filter import is_langfuse_span
 
+    # Only our own observations. The Anthropic and MCP SDKs emit their own OpenTelemetry spans for
+    # the same calls; exporting those too would show every call twice and double the trace cost.
+    client_options.setdefault("should_export_span", is_langfuse_span)
     client = Langfuse(
         public_key=public_key,
         secret_key=secret_key,
