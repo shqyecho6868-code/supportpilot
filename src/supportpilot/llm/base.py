@@ -2,8 +2,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
-Intent = Literal["order", "knowledge", "handoff"]
-INTENTS: tuple[Intent, ...] = ("order", "knowledge", "handoff")
+Intent = Literal["order", "knowledge", "handoff", "smalltalk", "out_of_scope"]
+INTENTS: tuple[Intent, ...] = ("order", "knowledge", "handoff", "smalltalk", "out_of_scope")
 
 TextCallback = Callable[[str], None]
 
@@ -34,3 +34,7 @@ class LLMClient(Protocol):
         tools: list[dict[str, Any]],
         on_text: TextCallback,
     ) -> LLMTurn: ...
+
+    async def rewrite_query(self, system: str, messages: list[dict[str, Any]]) -> str:
+        """Turn the latest message (plus conversation context) into a standalone search query."""
+        ...

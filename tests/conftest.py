@@ -37,6 +37,23 @@ def _test_database() -> None:
             conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(TEST_DB)))
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _knowledge_base(_test_database) -> None:
+    """Index the policy documents into the test database once per session.
+
+    Chunk contexts come from kb/contexts.json (offline); embeddings use the local fastembed model.
+    The KB tables are not touched by reset_database(), so they survive per-test resets.
+    """
+    import asyncio
+
+    from supportpilot.kb.contextualize import Contextualizer
+    from supportpilot.kb.ingest import ingest
+
+    defaults = Settings(_env_file=None)
+    ctx = Contextualizer(defaults.fast_model, allow_generate=False)
+    asyncio.run(ingest(TEST_DATABASE_URL, ctx, defaults.embedding_model))
+
+
 @pytest.fixture
 def settings() -> Settings:
     return Settings(

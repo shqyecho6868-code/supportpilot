@@ -1,16 +1,19 @@
 """LangGraph orchestration.
 
     START -> router -+-> order_agent <-> confirm   (confirm pauses with interrupt())
-                     +-> knowledge_agent
-                     +-> handoff
-             all three end in save_memory -> END
+                     +-> knowledge_agent            (rewrite query -> search_policy -> cited answer)
+                     +-> chitchat                   (smalltalk / out_of_scope: polite reply, no ticket)
+                     +-> handoff                    (opens a ticket for a human)
+             all of them end in save_memory -> END
 
 The confirm node is the human-in-the-loop gate: it pauses the graph before any
 tool in CONFIRMATION_REQUIRED runs. Because the graph is checkpointed to
 Postgres, a paused turn survives a process restart and resumes from /confirm.
 """
 
+import html
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -22,14 +25,17 @@ from langgraph.types import interrupt
 
 from supportpilot.graph.prompts import (
     ACTION_LOG_PREFIX,
-    KNOWLEDGE_PLACEHOLDER_REPLY,
+    CHITCHAT_PROMPT,
+    KNOWLEDGE_AGENT_PROMPT,
+    NO_POLICY_REPLY,
     ORDER_AGENT_PROMPT,
+    QUERY_REWRITE_PROMPT,
     ROUTER_PROMPT,
 )
 from supportpilot.graph.state import TurnState
 from supportpilot.llm import LLMClient
 from supportpilot.memory import ConversationMemory
-from supportpilot.tools import CONFIRMATION_REQUIRED, ToolGateway
+from supportpilot.tools import CONFIRMATION_REQUIRED, ORDER_AGENT_TOOLS, ToolGateway
 
 STEP_LIMIT_REPLY = "Sorry, I wasn't able to finish that. I can open a ticket for a human agent if you'd like."
 DECLINED_RESULT = (
@@ -44,6 +50,7 @@ class GraphDeps:
     tools: ToolGateway
     memory: ConversationMemory
     max_agent_steps: int = 8
+    query_rewrite: bool = True
 
 
 def _tool_result(tool_use_id: str, content: str, is_error: bool) -> dict[str, Any]:
@@ -96,6 +103,32 @@ def _action_log(messages: list[dict[str, Any]]) -> list[str]:
     return log
 
 
+_CITATION = re.compile(r"\[([^\[\]]+? § [^\[\]]+?)\]")
+
+
+def _sources_message(hits: list[dict[str, Any]], question: str) -> str:
+    passages = "\n".join(f'<source cite="{html.escape(h["source"])}">\n{h["text"]}\n</source>' for h in hits)
+    return f"<sources>\n{passages}\n</sources>\n\nCustomer question: {question}"
+
+
+def cited_sources(reply: str, hits: list[dict[str, Any]]) -> list[str]:
+    """Citations in the reply that match a retrieved passage."""
+    valid = {h["source"] for h in hits}
+    return [c for c in dict.fromkeys(_CITATION.findall(reply)) if c in valid]
+
+
+def _rewrite_input(conversation: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The whole conversation as one user message, so it is plainly data to the rewriter."""
+    earlier = "\n".join(f"{m['role']}: {m['content']}" for m in conversation[:-1])
+    return [
+        {
+            "role": "user",
+            "content": f"<conversation>\n{earlier}\n</conversation>\n\n"
+            f"<latest_message>\n{conversation[-1]['content']}\n</latest_message>",
+        }
+    ]
+
+
 def _emit_text(text: str) -> None:
     get_stream_writer()({"type": "token", "text": text})
 
@@ -114,7 +147,7 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
             return {"reply": STEP_LIMIT_REPLY}
 
         turn = await deps.llm.respond(
-            ORDER_AGENT_PROMPT, messages, await deps.tools.model_tools(), _emit_text
+            ORDER_AGENT_PROMPT, messages, await deps.tools.model_tools(ORDER_AGENT_TOOLS), _emit_text
         )
         messages = [*messages, {"role": "assistant", "content": turn.content}]
         if not turn.tool_uses:
@@ -206,8 +239,36 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
         }
 
     async def knowledge_agent(state: TurnState) -> dict[str, Any]:
-        _emit_text(KNOWLEDGE_PLACEHOLDER_REPLY)
-        return {"reply": KNOWLEDGE_PLACEHOLDER_REPLY}
+        conversation = _conversation(state)
+        query = state["user_message"]
+        # Only follow-ups need rewriting; a first message is already standalone.
+        if deps.query_rewrite and len(conversation) > 1:
+            query = await deps.llm.rewrite_query(QUERY_REWRITE_PROMPT, _rewrite_input(conversation)) or query
+
+        result = await deps.tools.call("search_policy", {"query": query}, user_id=state["user_id"])
+        hits = [] if result.is_error else json.loads(result.content)["results"]
+        get_stream_writer()({"type": "sources", "query": query, "sources": [h["source"] for h in hits]})
+        retrieval = {"query": query, "results": hits}
+        if not hits:
+            _emit_text(NO_POLICY_REPLY)
+            return {"reply": NO_POLICY_REPLY, "retrieval": retrieval}
+
+        messages = [
+            *conversation[:-1],
+            {"role": "user", "content": _sources_message(hits, state["user_message"])},
+        ]
+        turn = await deps.llm.respond(KNOWLEDGE_AGENT_PROMPT, messages, [], _emit_text)
+        reply = turn.text
+        if turn.stop_reason != "refusal" and not cited_sources(reply, hits):
+            # Every policy answer carries its sources, even if the model forgot to cite.
+            footer = "\n\nSources: " + "; ".join(f"[{h['source']}]" for h in hits[:2])
+            _emit_text(footer)
+            reply += footer
+        return {"reply": reply, "retrieval": retrieval}
+
+    async def chitchat(state: TurnState) -> dict[str, Any]:
+        turn = await deps.llm.respond(CHITCHAT_PROMPT, _conversation(state), [], _emit_text)
+        return {"reply": turn.text}
 
     async def handoff(state: TurnState) -> dict[str, Any]:
         transcript = "\n".join(f"{m['role']}: {m['content']}" for m in _conversation(state))
@@ -240,8 +301,13 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
         )
         return {}
 
-    def route_intent(state: TurnState) -> Literal["order_agent", "knowledge_agent", "handoff"]:
-        return {"knowledge": "knowledge_agent", "handoff": "handoff"}.get(state["intent"], "order_agent")
+    def route_intent(state: TurnState) -> Literal["order_agent", "knowledge_agent", "chitchat", "handoff"]:
+        return {
+            "knowledge": "knowledge_agent",
+            "handoff": "handoff",
+            "smalltalk": "chitchat",
+            "out_of_scope": "chitchat",
+        }.get(state["intent"], "order_agent")
 
     def after_order_agent(state: TurnState) -> Literal["confirm", "order_agent", "save_memory"]:
         if state.get("pending_action"):
@@ -255,6 +321,7 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
     graph.add_node("order_agent", order_agent)
     graph.add_node("confirm", confirm)
     graph.add_node("knowledge_agent", knowledge_agent)
+    graph.add_node("chitchat", chitchat)
     graph.add_node("handoff", handoff)
     graph.add_node("save_memory", save_memory)
 
@@ -263,6 +330,7 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
     graph.add_conditional_edges("order_agent", after_order_agent)
     graph.add_edge("confirm", "order_agent")
     graph.add_edge("knowledge_agent", "save_memory")
+    graph.add_edge("chitchat", "save_memory")
     graph.add_edge("handoff", "save_memory")
     graph.add_edge("save_memory", END)
     return graph.compile(checkpointer=checkpointer)

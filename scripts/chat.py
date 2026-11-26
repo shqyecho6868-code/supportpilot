@@ -33,6 +33,8 @@ def stream_chat(client: httpx.Client, user: str, session: str, message: str) -> 
                     print(data["text"], end="", flush=True)
                 elif event == "route":
                     print(f"[route: {data['intent']}] ", end="", flush=True)
+                elif event == "sources":
+                    print(f"[search: {data['query']!r}] ", end="", flush=True)
                 elif event == "confirmation_required":
                     confirmation = data
                 elif event == "error":

@@ -26,6 +26,7 @@ from supportpilot.api.schemas import ChatRequest, ConfirmRequest, ConfirmRespons
 from supportpilot.config import Settings, get_settings
 from supportpilot.db import create_pool
 from supportpilot.graph import GraphDeps, build_graph
+from supportpilot.kb import RetrievalConfig, Retriever
 from supportpilot.llm import LLMClient, build_llm
 from supportpilot.mcp_server import build_mcp_server
 from supportpilot.memory import ConversationMemory, SessionOwnershipError
@@ -59,9 +60,12 @@ def create_app(settings: Settings | None = None, llm: LLMClient | None = None) -
             )
             deps = GraphDeps(
                 llm=llm or build_llm(settings),
-                tools=ToolGateway(build_mcp_server(pool)),
+                tools=ToolGateway(
+                    build_mcp_server(pool, Retriever(pool, RetrievalConfig.from_settings(settings)))
+                ),
                 memory=memory,
                 max_agent_steps=settings.max_agent_steps,
+                query_rewrite=settings.retrieval_query_rewrite,
             )
             app.state.ctx = AppContext(settings, pool, redis, memory, build_graph(deps, checkpointer))
             yield

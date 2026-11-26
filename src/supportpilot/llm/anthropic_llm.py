@@ -39,10 +39,26 @@ def _to_param(block: Any) -> dict[str, Any]:
 
 
 class AnthropicLLM:
-    def __init__(self, model: str, api_key: str | None = None):
+    def __init__(self, model: str, api_key: str | None = None, fast_model: str | None = None):
         # With api_key=None the SDK resolves credentials from the environment.
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._model = model
+        self._fast_model = fast_model or model
+
+    async def rewrite_query(self, system: str, messages: list[dict[str, Any]]) -> str:
+        response = await self._client.messages.create(
+            model=self._fast_model,
+            max_tokens=256,
+            system=system,
+            messages=messages,
+            # A short, deterministic-as-possible rewrite: no thinking, low effort.
+            thinking={"type": "disabled"},
+            output_config={"effort": "low"},
+        )
+        text = "".join(b.text for b in response.content if b.type == "text").strip()
+        if response.stop_reason == "refusal" or not text:
+            return ""
+        return text.splitlines()[0].strip().strip('"')
 
     async def classify_intent(self, system: str, messages: list[dict[str, Any]]) -> Intent:
         response = await self._client.messages.create(
@@ -75,7 +91,7 @@ class AnthropicLLM:
             # Cache the stable prefix (tools + system) across turns.
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=messages,
-            tools=tools,
+            **({"tools": tools} if tools else {}),
             output_config={"effort": "low"},
         ) as stream:
             async for text in stream.text_stream:

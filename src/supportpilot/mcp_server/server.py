@@ -1,4 +1,4 @@
-"""MCP server exposing the order tools.
+"""MCP server exposing the order tools and the policy knowledge base.
 
 Security model
 --------------
@@ -20,6 +20,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
+
+from supportpilot.kb import Retriever
 
 USER_ID_META_KEY = "supportpilot/user_id"
 IDEMPOTENCY_KEY_PARAM = "idempotency_key"
@@ -63,11 +65,29 @@ def _request_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def build_mcp_server(pool: AsyncConnectionPool) -> MCPServer:
+def build_mcp_server(pool: AsyncConnectionPool, retriever: Retriever | None = None) -> MCPServer:
+    retriever = retriever or Retriever(pool)
     server = MCPServer(
-        "supportpilot-orders",
-        instructions="Order management tools for the authenticated SupportPilot customer.",
+        "supportpilot",
+        instructions=(
+            "Order management tools for the authenticated SupportPilot customer, "
+            "and search over the store's customer-service policies."
+        ),
     )
+
+    @server.tool()
+    async def search_policy(
+        query: Annotated[str, Field(description="A standalone search query about store policy.")],
+        ctx: Context,
+        top_k: Annotated[int | None, Field(ge=1, le=10, description="Number of passages to return.")] = None,
+    ) -> dict[str, Any]:
+        """Search the store's policies (returns, refunds, shipping, exchanges, warranty, payment,
+        Larkspur Plus membership, privacy). Returns the best-matching passages, each with a
+        `source` ("<document> § <section>") to cite."""
+        _current_user(ctx)  # policy text is not per-customer, but unauthenticated calls are still refused
+        config = retriever.config if top_k is None else retriever.config.with_(top_k=top_k)
+        hits = await retriever.search(query, config)
+        return {"query": query, "results": [h.as_dict() for h in hits]}
 
     @server.tool()
     async def get_order(

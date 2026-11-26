@@ -28,7 +28,7 @@ def data(result):
 
 async def test_model_facing_schemas_never_expose_user_id_or_idempotency_key(gateway):
     tools = {t["name"]: t for t in await gateway.model_tools()}
-    assert set(tools) == {"get_order", "list_my_orders", "update_address", "create_ticket"}
+    assert set(tools) == {"get_order", "list_my_orders", "update_address", "create_ticket", "search_policy"}
     for tool in tools.values():
         props = tool["input_schema"].get("properties", {})
         assert "user_id" not in props

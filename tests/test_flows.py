@@ -136,10 +136,44 @@ async def test_owner_can_read_their_order(client):
 # --- Routing -------------------------------------------------------------------------
 
 
-async def test_knowledge_route_returns_placeholder(client):
-    turn = await chat(client, ALICE, "What is your refund policy?")
+async def test_knowledge_route_answers_with_a_citation(client):
+    turn = await chat(client, ALICE, "What is your refund policy for credit cards?")
     assert turn["route"] == "knowledge"
-    assert "next release" in turn["reply"]
+    sources = next(d for n, d in turn["events"] if n == "sources")
+    assert sources["sources"], "retrieval returned nothing"
+    assert any(s.startswith("Refunds Policy § ") for s in sources["sources"])
+    # The reply cites a retrieved passage as [Document § Section].
+    assert f"[{sources['sources'][0]}]" in turn["reply"]
+
+
+async def test_knowledge_follow_up_is_answered_from_policies(client):
+    first = await chat(client, ALICE, "What is the warranty on electronics?")
+    turn = await chat(
+        client, ALICE, "What is the warranty policy for office chairs?", first["meta"]["session_id"]
+    )
+    sources = next(d for n, d in turn["events"] if n == "sources")
+    assert "Warranty Policy § Furniture coverage" in sources["sources"]
+
+
+async def _ticket_count(user_id: str) -> int:
+    async with await psycopg.AsyncConnection.connect(TEST_DATABASE_URL) as conn:
+        cur = await conn.execute("SELECT count(*) FROM tickets WHERE customer_id = %s", (user_id,))
+        (count,) = await cur.fetchone()
+    return count
+
+
+async def test_smalltalk_gets_a_polite_reply_and_no_ticket(client):
+    turn = await chat(client, ALICE, "Hello there!")
+    assert turn["route"] == "smalltalk"
+    assert turn["reply"]
+    assert await _ticket_count(ALICE) == 0
+
+
+async def test_out_of_scope_gets_a_polite_reply_and_no_ticket(client):
+    turn = await chat(client, ALICE, "What's the weather like in Paris?")
+    assert turn["route"] == "out_of_scope"
+    assert "orders" in turn["reply"]
+    assert await _ticket_count(ALICE) == 0
 
 
 async def test_handoff_route_opens_ticket(client):

@@ -13,3 +13,4 @@ class TurnState(TypedDict, total=False):
     pending_action: dict[str, Any] | None  # tool call awaiting human confirmation
     steps: int
     reply: str | None
+    retrieval: dict[str, Any] | None  # knowledge agent: the search query and passages it used

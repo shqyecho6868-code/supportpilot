@@ -20,6 +20,8 @@ uv run pytest -m live                # tests that call real Claude
 uv run ruff check . && uv run ruff format .
 uv run python scripts/reset_db.py    # rebuild the dev database from db/init/*.sql
 uv run python scripts/chat.py --user cust_001   # interactive client
+uv run python scripts/ingest_kb.py   # (re)index kb/policies; new chunks call Haiku, others reuse kb/contexts.json
+uv run supportpilot-eval compare     # full eval vs. evals/baseline.json, non-zero exit on a >5pp regression
 ```
 
 ## Layout
@@ -29,6 +31,9 @@ uv run python scripts/chat.py --user cust_001   # interactive client
 - `src/supportpilot/graph/` -- LangGraph state, prompts and nodes.
 - `src/supportpilot/llm/` -- `AnthropicLLM` (real) and `RuleBasedLLM` (deterministic test double).
 - `src/supportpilot/api/` -- FastAPI app.
+- `src/supportpilot/kb/` -- policy chunking, Contextual Retrieval, fastembed models, hybrid `Retriever`.
+- `src/supportpilot/evals/` -- eval runner, metrics, judges (`supportpilot-eval`); cases in `evals/golden.jsonl`.
+- `kb/policies/` -- policy documents (source of truth); `kb/contexts.json` -- cached chunk contexts.
 - `db/init/` -- schema and seed SQL. `tests/` -- pytest.
 
 ## Rules
@@ -38,3 +43,5 @@ uv run python scripts/chat.py --user cust_001   # interactive client
 - Code before `interrupt()` in a node re-runs on resume: keep it free of side effects.
 - Tests must pass offline with `LLM_PROVIDER=rule_based`; tests that hit the API are marked `live`.
 - Never commit `.env`.
+- After editing `kb/policies/*.md`, re-run `scripts/ingest_kb.py` and commit the updated `kb/contexts.json`
+  (the offline tests index the KB from it), then check `evals/golden.jsonl` source labels still hold.

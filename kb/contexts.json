@@ -1,0 +1,277 @@
+{
+  "exchanges#advance-exchanges": {
+    "context": "This chunk comes from the Exchanges Policy document of the Larkspur online store and covers advance exchanges, a benefit available only to Larkspur Plus members, in which the replacement ships before the original item is returned and a card hold is placed that is charged if the original isn't received within 21 days.",
+    "hash": "1c78138d2c926810",
+    "model": "claude-haiku-5-5"
+  },
+  "exchanges#exchange-window": {
+    "context": "This chunk is from the Exchanges Policy of the online store's customer-support documents, and it covers the exchange window: items can be swapped for a different size or color of the same product within 45 days of delivery, which is longer than the 30-day return window, while swapping for a different product is not allowed.",
+    "hash": "522a278539f4425a",
+    "model": "claude-haiku-5-5"
+  },
+  "exchanges#how-exchanges-work": {
+    "context": "This chunk is from the Exchanges Policy of the online store's customer-support documents and explains the step-by-step process for starting an exchange through the Returns Portal, including the free prepaid return label and free shipping both ways on an item's first exchange.",
+    "hash": "22ec3db08c35ac7d",
+    "model": "claude-haiku-5-5"
+  },
+  "exchanges#limits": {
+    "context": "This chunk comes from the \"Exchanges Policy\" document of the online store's customer-support policies and covers the limits on exchanges: each item may be exchanged only once, and any further change to the replacement must be handled as a refund under the Returns Policy followed by a new order.",
+    "hash": "39ce0398c239f779",
+    "model": "claude-haiku-5-5"
+  },
+  "exchanges#out-of-stock-replacements": {
+    "context": "This chunk comes from the Exchanges Policy document and covers what happens when the requested size or color is unavailable, namely store credit or a refund to the original payment method instead of holding the exchange open for a restock.",
+    "hash": "3f37e1b4f141d760",
+    "model": "claude-haiku-5-5"
+  },
+  "exchanges#price-differences": {
+    "context": "This chunk comes from the Exchanges Policy of the online store's customer-support documents and covers how price differences are handled when an item is exchanged for a replacement of different cost: a higher-priced replacement requires paying the difference up front, while a lower-priced one results in a refund of the difference to the original payment method.",
+    "hash": "550897b9330ad696",
+    "model": "claude-haiku-5-5"
+  },
+  "exchanges#what-can-be-exchanged": {
+    "context": "This chunk comes from the \"Exchanges Policy\" document of the online store's customer-support policies and covers eligibility rules for exchanges, specifying the condition items must be in, which product types are excluded (final-sale, gift cards, personalized items), and the narrow conditions under which electronics can be exchanged.",
+    "hash": "8ac2270f75b7a003",
+    "model": "claude-haiku-5-5"
+  },
+  "membership#cancelling-a-membership": {
+    "context": "This chunk is from the \"Cancelling a membership\" section of the Larkspur Plus Membership policy document, explaining how and when members can cancel their annual or monthly plans, including refund eligibility, the 30-day full-refund window for annual plans, and the rules for free-trial cancellations.",
+    "hash": "535e74eac767ab2b",
+    "model": "claude-haiku-5-5"
+  },
+  "membership#early-access": {
+    "context": "This chunk is from the Larkspur Plus Membership policy document and covers the early access benefit, explaining that members get seasonal sales 24 hours ahead of the public and member-only deals posted on the first Monday of each month.",
+    "hash": "58dc906906afa2a1",
+    "model": "claude-haiku-5-5"
+  },
+  "membership#household-sharing": {
+    "context": "This chunk comes from the Larkspur Plus Membership policy document and explains the household sharing rules, which let a member extend shipping and returns benefits to one other person at the same address while keeping rewards credit and the extended electronics warranty with the account holder only.",
+    "hash": "e6e18636c405f426",
+    "model": "claude-haiku-5-5"
+  },
+  "membership#plans-and-pricing": {
+    "context": "This chunk is from the Larkspur Plus Membership policy document and covers the membership's plans and pricing: the annual and monthly costs, the one-time 30-day free trial, and automatic renewal.",
+    "hash": "fece19450de4ccf0",
+    "model": "claude-haiku-5-5"
+  },
+  "membership#shipping-and-returns-benefits": {
+    "context": "This chunk comes from the Larkspur Plus Membership policy document and covers the shipping and returns perks members receive, including free 2-day shipping, free return labels, extended return windows for most items and electronics, and member-only advance exchanges.",
+    "hash": "a8b6b662b1e8edb9",
+    "model": "claude-haiku-5-5"
+  },
+  "membership#warranty-and-rewards-benefits": {
+    "context": "This chunk is from the \"Larkspur Plus Membership\" policy document and covers the warranty and rewards benefits, explaining the extra year of electronics warranty for members and the 5% Larkspur Rewards credit, including its 12-month expiry and restrictions.",
+    "hash": "9a668fc954887c7b",
+    "model": "claude-haiku-5-5"
+  },
+  "payment#accepted-payment-methods": {
+    "context": "This chunk is from the Larkspur Supply \"Payment Policy\" document and covers the accepted payment methods at checkout, including cards, PayPal, Apple Pay, Google Pay, Larkspur gift cards and Klarna, along with the payment types not accepted (checks, money orders, cash on delivery, cryptocurrency, wire transfers) and notes on US-dollar pricing and foreign card fees.",
+    "hash": "444804d40bf0b741",
+    "model": "claude-haiku-5-5"
+  },
+  "payment#failed-payments": {
+    "context": "This chunk is from the Larkspur Supply Payment Policy and covers what happens when a payment fails at shipping time, such as an expired card: the customer is emailed, the order is held for 48 hours, and it is cancelled automatically if the payment method is not updated.",
+    "hash": "ab2dbdf55d9bdde6",
+    "model": "claude-haiku-5-5"
+  },
+  "payment#gift-cards": {
+    "context": "This chunk is from the \"Payment Policy\" document of the Larkspur Supply online store and covers the Gift cards section: that Larkspur gift cards never expire or carry fees, how many can be used per order, what they cannot be used for, and how lost or stolen cards are replaced.",
+    "hash": "20d0ccba76f3c522",
+    "model": "claude-haiku-5-5"
+  },
+  "payment#klarna-pay-in-4": {
+    "context": "This chunk comes from Larkspur Supply's Payment Policy and explains the Klarna pay-in-4 option, covering its four interest-free biweekly installments, the $35 to $1,000 order range for US customers, and the fact that Klarna handles approval and late fees rather than Larkspur.",
+    "hash": "3a7d5b9b3b50c3d7",
+    "model": "claude-haiku-5-5"
+  },
+  "payment#payment-security": {
+    "context": "This chunk comes from the Larkspur Supply Payment Policy and covers payment security: how card numbers are encrypted and handled by the payment processor rather than stored by Larkspur, and the rule that support staff will never request full card numbers, security codes or passwords through chat, email or phone.",
+    "hash": "a45324d67d2b33c5",
+    "model": "claude-haiku-5-5"
+  },
+  "payment#sales-tax": {
+    "context": "This chunk is from Larkspur Supply's \"Payment Policy\" document and covers how sales tax is determined on orders, based on the shipping address rather than the billing address, and how tax-exempt organizations can request an exemption certificate before ordering.",
+    "hash": "114006cecfc12fec",
+    "model": "claude-haiku-5-5"
+  },
+  "payment#when-you-are-charged": {
+    "context": "This chunk comes from Larkspur Supply's Payment Policy and explains when customers are billed: the card is authorized at checkout, charged at shipment (separately for each package of a split order), and any hold on a cancelled order is released by the customer's bank within about 3 to 7 business days.",
+    "hash": "afbe98489fcdaea8",
+    "model": "claude-haiku-5-5"
+  },
+  "privacy#accessing-and-exporting-your-data": {
+    "context": "This chunk is from the Privacy Policy of Larkspur's online store and covers how customers can request an export of the personal data the store holds about them, including where to submit the request and the 30-day delivery timeline after identity verification.",
+    "hash": "e18ce56efdb46545",
+    "model": "claude-haiku-5-5"
+  },
+  "privacy#children": {
+    "context": "This chunk is from the Privacy Policy of the Larkspur online store and covers the \"Children\" section, which states that the site is not aimed at children under 13 and explains that any data collected from such a child is deleted.",
+    "hash": "820aa2a0067cfc90",
+    "model": "claude-haiku-5-5"
+  },
+  "privacy#cookies": {
+    "context": "This chunk is from the \"Cookies\" section of the Larkspur online store's Privacy Policy, explaining which cookie types the site uses (essential, analytics, and advertising) and how customers can switch off the optional ones through Cookie Preferences in the site footer.",
+    "hash": "55394a7251a6869c",
+    "model": "claude-haiku-5-5"
+  },
+  "privacy#deleting-your-data": {
+    "context": "This chunk comes from the \"Deleting your data\" section of Larkspur's Privacy Policy, explaining how customers can request deletion of their account and personal data, the 45-day completion window after identity verification, and which order and payment records must be retained by law and are excluded from marketing use.",
+    "hash": "d808a74df441453f",
+    "model": "claude-haiku-5-5"
+  },
+  "privacy#how-long-we-keep-data": {
+    "context": "This chunk is from the Larkspur online store's Privacy Policy and covers the \"How long we keep data\" section, which sets out retention periods for order and payment records (7 years), support chat transcripts (90 days), and marketing preferences (while the account is open), and notes that full card numbers are never stored.",
+    "hash": "c25b7f26dc95cd02",
+    "model": "claude-haiku-5-5"
+  },
+  "privacy#information-we-collect": {
+    "context": "This chunk comes from the \"Information we collect\" section of Larkspur's Privacy Policy, and it describes the personal data the store gathers, both data customers provide directly (name, email, shipping addresses, order history) and data collected automatically through site use (device type, pages viewed, approximate location), along with the statement that personal information is never sold.",
+    "hash": "98e5f7347adfbf5b",
+    "model": "claude-haiku-5-5"
+  },
+  "privacy#marketing-emails": {
+    "context": "This chunk comes from the Larkspur online store's Privacy Policy and covers how customers can unsubscribe from marketing emails via the link in any message or under Account > Notifications, the 10-business-day processing time for opt-outs, and the fact that order confirmations and shipping updates continue after unsubscribing.",
+    "hash": "50c36953da5fb9de",
+    "model": "claude-haiku-5-5"
+  },
+  "refunds#cancelled-orders": {
+    "context": "This chunk comes from the \"Refunds Policy\" document and covers the \"Cancelled orders\" section, explaining that orders cancelled before shipment are refunded in full and how the card authorization hold is released, typically within 3 to 7 business days.",
+    "hash": "64153f7838e46f2e",
+    "model": "claude-haiku-5-5"
+  },
+  "refunds#partial-refunds": {
+    "context": "This chunk comes from the \"Refunds Policy\" document of the online store's customer-support policies and covers the \"Partial refunds\" section, explaining when a reduced refund applies (used, customer-damaged, or incomplete returns, with deductions up to 50% of the item price) and noting that the separate 15% restocking fee for opened, non-defective electronics is not part of those deductions.",
+    "hash": "df1010fe5d88bfbc",
+    "model": "claude-haiku-5-5"
+  },
+  "refunds#price-adjustments": {
+    "context": "This chunk is from the \"Refunds Policy\" document for the online store and covers price adjustments: how a refund of the difference is available if an item's price drops within 14 days of purchase (once per order), which items and price sources are excluded, and how the refund is returned to the original payment method.",
+    "hash": "0a531db8637c5b92",
+    "model": "claude-haiku-5-5"
+  },
+  "refunds#refund-timing-by-payment-method": {
+    "context": "This chunk comes from the Refunds Policy document and explains how long a refund takes to appear after it is issued, broken down by payment method (cards, PayPal, Apple Pay and Google Pay, Klarna, and store credit).",
+    "hash": "ef9e2d50737f696c",
+    "model": "claude-haiku-5-5"
+  },
+  "refunds#shipping-charges": {
+    "context": "This chunk is from the \"Refunds Policy\" document and covers when original shipping charges can be refunded, namely only if the return is the store's fault (defective, damaged in transit, or wrong item), and how the $6.95 return label fee is deducted from refunds.",
+    "hash": "e7eec0f08b29b19e",
+    "model": "claude-haiku-5-5"
+  },
+  "refunds#when-a-refund-is-issued": {
+    "context": "This chunk comes from the Refunds Policy document and explains when a refund is issued after a returned item reaches the warehouse, including the 2-business-day inspection window, the 3-business-day refund timeline, and why the refund date depends on inspection rather than the shipping date.",
+    "hash": "0aa7094e2e2ac31a",
+    "model": "claude-haiku-5-5"
+  },
+  "refunds#where-refunds-go": {
+    "context": "This chunk is from the Refunds Policy document and covers where refund money is sent, explaining that refunds return to the original payment method, when they become store credit instead (closed or returned cards, gift card purchases), and why refunds cannot go to a different card, bank account, or person.",
+    "hash": "8c270826cfce3f2d",
+    "model": "claude-haiku-5-5"
+  },
+  "returns#condition-of-returned-items": {
+    "context": "This chunk is from the \"Returns Policy\" document of the online store's customer-support materials, and it covers the condition requirements that returned items must meet, including original packaging, tags, and outdoor-wear limits for shoes, along with the partial refund or customer-paid return consequences for used, damaged, or incomplete items.",
+    "hash": "34ea61a09f10aaf3",
+    "model": "claude-haiku-5-5"
+  },
+  "returns#electronics": {
+    "context": "This chunk is from the \"Returns Policy\" document of the online store's customer-support policies, and it covers the Electronics section: the shorter 15-day return window for headphones, keyboards, monitors, speakers and other electronics (30 days for Larkspur Plus members), the requirement to return all accessories, cables and manuals, and the 15% restocking fee that applies to opened, non-defective items but not to sealed or defective ones.",
+    "hash": "64c2bb43132ef0b6",
+    "model": "claude-haiku-5-5"
+  },
+  "returns#holiday-returns": {
+    "context": "This chunk comes from the \"Returns Policy\" document of the online store's customer-support policies and covers the extended holiday return window: purchases made November 15 to December 24 may be returned until January 31 of the following year, with electronics and final-sale items excluded.",
+    "hash": "dedeac42766163f9",
+    "model": "claude-haiku-5-5"
+  },
+  "returns#how-to-start-a-return": {
+    "context": "This chunk from the \"Returns Policy\" document of the online store's customer-support policies explains the first step of the return process: starting a return in the Returns Portal, obtaining an RMA number, and the 14-day deadline for dropping off the package, with packages lacking an RMA number refused at the warehouse.",
+    "hash": "fb8348b1bea34a47",
+    "model": "claude-haiku-5-5"
+  },
+  "returns#items-that-cannot-be-returned": {
+    "context": "This chunk comes from the \"Returns Policy\" document for the online store and covers the list of items that cannot be returned or exchanged, such as final-sale clearance goods, gift cards, personalized items, perishables, and opened personal-care products, noting that final-sale items remain under warranty if defective.",
+    "hash": "4f0e54e7bcd3795d",
+    "model": "claude-haiku-5-5"
+  },
+  "returns#return-shipping-costs": {
+    "context": "This chunk from the Returns Policy document covers return shipping costs: free prepaid labels for defective, damaged or incorrect items, a $6.95 label fee deducted from refunds for other returns, and free labels for all returns for Larkspur Plus members.",
+    "hash": "e729f81a80e92775",
+    "model": "claude-haiku-5-5"
+  },
+  "returns#return-window": {
+    "context": "This chunk from the \"Returns Policy\" document explains the standard return window: most items can be returned within 30 days of delivery (60 days for Larkspur Plus members), counted in calendar days and closing at 11:59 pm Eastern Time, with each package in a multi-package order having its own window starting from its own delivery date.",
+    "hash": "d81118cf25f44ef1",
+    "model": "claude-haiku-5-5"
+  },
+  "shipping#changing-a-shipping-address": {
+    "context": "This chunk is from the Shipping Policy of the online store's customer-support documents, under the section on changing a shipping address, and explains that the address can be altered only before an order ships, while already-shipped orders must be redirected through the carrier, which is not guaranteed and may incur extra charges.",
+    "hash": "065e71c8a8fc6c98",
+    "model": "claude-haiku-5-5"
+  },
+  "shipping#damaged-deliveries": {
+    "context": "This chunk is from the Shipping Policy's \"Damaged deliveries\" section, explaining that customers must report a damaged package within 48 hours of delivery with photos, and what remedies (replacement or refund including shipping) and packaging-retention requirements apply.",
+    "hash": "c84de3c771d911e0",
+    "model": "claude-haiku-5-5"
+  },
+  "shipping#lost-packages": {
+    "context": "This chunk is from the Shipping Policy's \"Lost packages\" section, and it explains when a customer should report a missing order (no tracking movement for 7 days, or no arrival within 30 days of the expected delivery date), what the store will do about it (open a carrier claim and provide a replacement or full refund including shipping), and the 30-day deadline for filing a claim.",
+    "hash": "5adb720f52bfc49b",
+    "model": "claude-haiku-5-5"
+  },
+  "shipping#processing-time": {
+    "context": "This chunk comes from the \"Processing time\" section of the Shipping Policy, explaining how the 2 pm Eastern cutoff, weekends and US holidays affect when an order ships, and the extra warehouse delay for large furniture items.",
+    "hash": "7907f58b71808eea",
+    "model": "claude-haiku-5-5"
+  },
+  "shipping#shipping-options-and-costs": {
+    "context": "This chunk comes from the Shipping Policy of the online store's customer-support documents and covers the available shipping methods, their delivery timeframes and prices, the noon cutoff and PO box restriction for overnight orders, and the free 2-day shipping benefit for Larkspur Plus members.",
+    "hash": "2f628921437aeb85",
+    "model": "claude-haiku-5-5"
+  },
+  "shipping#tracking": {
+    "context": "This chunk comes from the Shipping Policy document's \"Tracking\" section, and explains when customers receive their tracking number, how long it can take for the first carrier scan to appear, and that multi-box orders get a separate tracking number for each box.",
+    "hash": "eefd039e06a921db",
+    "model": "claude-haiku-5-5"
+  },
+  "shipping#where-we-ship": {
+    "context": "This chunk is from the Shipping Policy document and covers the \"Where we ship\" section, explaining which US territories, military addresses and international countries the store delivers to, along with the shipping limits and delivery times for each region.",
+    "hash": "492bd1e895d947bf",
+    "model": "claude-haiku-5-5"
+  },
+  "warranty#careguard-protection-plans": {
+    "context": "This chunk comes from Larkspur Supply's Warranty Policy and covers the optional CareGuard protection plans, which add accidental-damage coverage (drops, spills, cracked screens) for 2 or 3 years, including the 30-day enrollment window and the cancellation and refund terms.",
+    "hash": "4ea6148be23131db",
+    "model": "claude-haiku-5-5"
+  },
+  "warranty#electronics-coverage": {
+    "context": "This chunk, from Larkspur Supply's Warranty Policy, covers the electronics section: the standard 1-year warranty on electronics, the extra year available to active Larkspur Plus members, and the shorter 6-month limit on batteries.",
+    "hash": "3d872e640bd16310",
+    "model": "claude-haiku-5-5"
+  },
+  "warranty#furniture-coverage": {
+    "context": "This chunk is from Larkspur Supply's Warranty Policy and explains the extended warranty periods for furniture, such as office chairs and desks: 5 years on the frame, 2 years on mechanisms like gas lifts, tilt controls and casters, and 1 year on upholstery, foam and fabric.",
+    "hash": "51eb365e46485578",
+    "model": "claude-haiku-5-5"
+  },
+  "warranty#limited-warranty": {
+    "context": "This chunk is from the Larkspur Supply Warranty Policy and introduces the general limited warranty that covers all products against manufacturing defects for one year from delivery, including its scope and its restriction to the original purchaser.",
+    "hash": "b6ea15107b823e49",
+    "model": "claude-haiku-5-5"
+  },
+  "warranty#making-a-warranty-claim": {
+    "context": "This chunk is from the Larkspur Supply Warranty Policy and explains the step-by-step process for filing a warranty claim, including what documentation to submit, how the free return shipping label is issued, and the typical turnaround time for repair, replacement, or refund.",
+    "hash": "bbfcfaabdddd1b1a",
+    "model": "claude-haiku-5-5"
+  },
+  "warranty#replacement-coverage": {
+    "context": "This chunk comes from the Larkspur Supply Warranty Policy and covers what happens after a product is repaired or replaced under warranty, specifically how long the new coverage lasts and how warranty refunds are paid out.",
+    "hash": "1502acb8d76deb31",
+    "model": "claude-haiku-5-5"
+  },
+  "warranty#what-is-not-covered": {
+    "context": "This chunk comes from Larkspur Supply's Warranty Policy and covers the exclusions to the limited warranty, listing the kinds of damage and situations it does not cater to, such as accidental drops, liquid damage, normal wear, and third-party purchases, and noting that accidental damage can instead be addressed by a CareGuard protection plan.",
+    "hash": "33d70ff31e291939",
+    "model": "claude-haiku-5-5"
+  }
+}

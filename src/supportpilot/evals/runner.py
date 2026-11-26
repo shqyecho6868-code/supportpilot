@@ -1,0 +1,190 @@
+"""Run golden cases through the real graph and record what happened.
+
+Each case runs against a dedicated database (``supportpilot_eval``) whose order
+tables are reset before the case, so mutations in one case cannot leak into the
+next. Tool calls are recorded by wrapping the ToolGateway; the human
+confirmation step is auto-approved so address changes can complete.
+"""
+
+import json
+import logging
+import time
+import uuid
+from dataclasses import dataclass
+from typing import Any
+
+import psycopg
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
+from psycopg import sql
+from redis.asyncio import Redis
+
+from supportpilot.db import create_pool, reset_database
+from supportpilot.evals.cases import Case
+from supportpilot.graph import GraphDeps, build_graph
+from supportpilot.graph.builder import _rewrite_input, _sources_message, cited_sources
+from supportpilot.graph.prompts import KNOWLEDGE_AGENT_PROMPT, QUERY_REWRITE_PROMPT
+from supportpilot.kb import RetrievalConfig, Retriever
+from supportpilot.kb.contextualize import Contextualizer
+from supportpilot.kb.ingest import ingest
+from supportpilot.llm import LLMClient
+from supportpilot.mcp_server import build_mcp_server
+from supportpilot.memory import ConversationMemory
+from supportpilot.tools import ToolGateway, ToolResult
+
+log = logging.getLogger(__name__)
+
+EVAL_DB = "supportpilot_eval"
+
+
+def eval_database_url(server_url: str) -> str:
+    return f"{server_url.rsplit('/', 1)[0]}/{EVAL_DB}"
+
+
+async def prepare_database(server_url: str, fast_model: str, embedding_model: str) -> str:
+    """Create the eval database if needed and (re)index the knowledge base offline."""
+    async with await psycopg.AsyncConnection.connect(server_url, autocommit=True) as conn:
+        cur = await conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (EVAL_DB,))
+        if await cur.fetchone() is None:
+            await conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(EVAL_DB)))
+    url = eval_database_url(server_url)
+    await reset_database(url)
+    await ingest(url, Contextualizer(fast_model, allow_generate=False), embedding_model)
+    return url
+
+
+class RecordingGateway(ToolGateway):
+    def __init__(self, server):
+        super().__init__(server)
+        self.calls: list[dict[str, Any]] = []
+
+    async def call(self, name, arguments, *, user_id, idempotency_key=None) -> ToolResult:
+        result = await super().call(name, arguments, user_id=user_id, idempotency_key=idempotency_key)
+        self.calls.append(
+            {"name": name, "args": arguments, "is_error": result.is_error, "result": result.content}
+        )
+        return result
+
+
+async def _snapshot(url: str, order_ids: tuple[str, ...]) -> dict[str, Any]:
+    async with await psycopg.AsyncConnection.connect(url) as conn:
+        cur = await conn.execute(
+            "SELECT id, shipping_address, status FROM orders WHERE id = ANY(%s) ORDER BY id",
+            (list(order_ids),),
+        )
+        orders = {r[0]: [r[1], r[2]] for r in await cur.fetchall()}
+        (tickets,) = await (await conn.execute("SELECT count(*) FROM tickets")).fetchone()
+    return {"orders": orders, "tickets": tickets}
+
+
+@dataclass
+class AgentRunner:
+    database_url: str
+    redis_url: str
+    llm: LLMClient
+    retrieval: RetrievalConfig
+    query_rewrite: bool = True
+
+    async def run_case(self, case: Case) -> dict[str, Any]:
+        await reset_database(self.database_url)
+        redis = Redis.from_url(self.redis_url)
+        await redis.flushdb()
+        pool = create_pool(self.database_url, max_size=4)
+        await pool.open(wait=True)
+        try:
+            return await self._run(case, pool, redis)
+        except Exception as exc:  # noqa: BLE001 - record the failure, keep evaluating
+            log.exception("case %s crashed", case.id)
+            return {
+                "id": case.id,
+                "error": repr(exc),
+                "route": None,
+                "tools": [],
+                "reply": "",
+                "retrieval": None,
+            }
+        finally:
+            await pool.close()
+            await redis.aclose()
+
+    async def _run(self, case: Case, pool, redis: Redis) -> dict[str, Any]:
+        memory = ConversationMemory(redis, max_messages=20, ttl_seconds=3600)
+        session_id = f"eval-{case.id}-{uuid.uuid4().hex[:6]}"
+        await memory.claim(session_id, case.user_id)
+        history = list(case.history)
+        for user, assistant in zip(history[::2], history[1::2], strict=True):
+            await memory.append_turn(session_id, user["content"], assistant["content"])
+
+        gateway = RecordingGateway(build_mcp_server(pool, Retriever(pool, self.retrieval)))
+        graph = build_graph(
+            GraphDeps(llm=self.llm, tools=gateway, memory=memory, query_rewrite=self.query_rewrite),
+            InMemorySaver(),
+        )
+        watched = tuple(
+            sorted(
+                {*case.protected_orders, *([case.expect_address["order_id"]] if case.expect_address else [])}
+            )
+        )
+        before = await _snapshot(self.database_url, watched)
+
+        config = {"configurable": {"thread_id": session_id}}
+        initial = {
+            "user_id": case.user_id,
+            "session_id": session_id,
+            "user_message": case.message,
+            "history": await memory.history(session_id),
+        }
+        started = time.monotonic()
+        route = None
+        async for chunk in graph.astream(initial, config, stream_mode="custom"):
+            if chunk["type"] == "route":
+                route = chunk["intent"]
+        state = await graph.aget_state(config)
+        confirmation = None
+        # Auto-approve confirmations (at most a few, in case the agent chains changes).
+        for _ in range(3):
+            if not state.interrupts:
+                break
+            confirmation = state.interrupts[0].value
+            await graph.ainvoke(Command(resume="approve"), config)
+            state = await graph.aget_state(config)
+        after = await _snapshot(self.database_url, watched)
+        values = state.values
+        reply = values.get("reply") or ""
+        retrieval = values.get("retrieval")
+        return {
+            "id": case.id,
+            "error": None,
+            "route": route,
+            "tools": gateway.calls,
+            "reply": reply,
+            "retrieval": retrieval,
+            "confirmation": confirmation,
+            "tickets_created": after["tickets"] - before["tickets"],
+            "orders_before": before["orders"],
+            "orders_after": after["orders"],
+            "model_cited": bool(
+                retrieval and cited_sources(reply.split("\n\nSources: ")[0], retrieval["results"])
+            ),
+            "seconds": round(time.monotonic() - started, 2),
+        }
+
+
+async def rewrite_for_retrieval(llm: LLMClient, case: Case) -> str:
+    """The search query the knowledge agent would use for this case."""
+    if not case.history:
+        return case.message
+    conversation = [*case.history, {"role": "user", "content": case.message}]
+    return await llm.rewrite_query(QUERY_REWRITE_PROMPT, _rewrite_input(conversation)) or case.message
+
+
+async def answer_with(llm: LLMClient, retriever: Retriever, cfg: RetrievalConfig, case: Case, query: str):
+    """The knowledge agent's retrieve-then-answer step, for one retrieval configuration."""
+    hits = [h.as_dict() for h in await retriever.search(query, cfg)]
+    messages = [*case.history, {"role": "user", "content": _sources_message(hits, case.message)}]
+    turn = await llm.respond(KNOWLEDGE_AGENT_PROMPT, messages, [], lambda _t: None)
+    return hits, turn.text
+
+
+def dumps(obj: Any) -> str:
+    return json.dumps(obj, indent=2, default=str)

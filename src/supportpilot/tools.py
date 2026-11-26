@@ -19,6 +19,10 @@ from supportpilot.mcp_server import IDEMPOTENCY_KEY_PARAM, USER_ID_META_KEY
 # Tools that change customer data. The graph pauses for confirmation before running them.
 CONFIRMATION_REQUIRED = frozenset({"update_address"})
 
+# Tools the order agent may call. search_policy is called by the knowledge agent itself
+# (single-shot retrieval), so the order agent does not see it.
+ORDER_AGENT_TOOLS = frozenset({"get_order", "list_my_orders", "update_address", "create_ticket"})
+
 # Parameters the orchestrator fills in; the model never sees or sets them.
 ORCHESTRATOR_PARAMS: dict[str, frozenset[str]] = {"update_address": frozenset({IDEMPOTENCY_KEY_PARAM})}
 
@@ -50,8 +54,15 @@ class ToolGateway:
         self._server = server
         self._model_tools: list[dict[str, Any]] | None = None
 
-    async def model_tools(self) -> list[dict[str, Any]]:
-        """Tool definitions in Anthropic Messages API format, derived from the MCP server."""
+    async def model_tools(self, names: frozenset[str] | None = None) -> list[dict[str, Any]]:
+        """Tool definitions in Anthropic Messages API format, derived from the MCP server.
+
+        ``names`` restricts the list to those tools (order is kept stable for prompt caching).
+        """
+        tools = await self._all_model_tools()
+        return tools if names is None else [t for t in tools if t["name"] in names]
+
+    async def _all_model_tools(self) -> list[dict[str, Any]]:
         if self._model_tools is None:
             async with Client(self._server) as client:
                 listed = await client.list_tools()

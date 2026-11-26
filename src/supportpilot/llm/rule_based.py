@@ -5,6 +5,7 @@ so the graph, MCP tools, confirmation flow and restart recovery can be tested
 end to end without network access or API cost. Production uses ``AnthropicLLM``.
 """
 
+import html
 import json
 import re
 import uuid
@@ -22,6 +23,10 @@ _HANDOFF = re.compile(r"\b(human|real person|representative|live agent|speak to 
 _KNOWLEDGE = re.compile(
     r"\b(policy|policies|return window|refund policy|warranty|how long does shipping)\b", re.I
 )
+_SMALLTALK = re.compile(r"^\s*(hi|hello|hey|thanks|thank you|good (morning|afternoon|evening)|bye)\b", re.I)
+_OUT_OF_SCOPE = re.compile(r"\b(weather|poem|joke|recipe|stock price)\b", re.I)
+_SOURCE = re.compile(r'<source cite="(?P<cite>[^"]+)">\n(?P<text>.*?)\n</source>', re.S)
+_LATEST = re.compile(r"<latest_message>\n(?P<text>.*?)\n</latest_message>", re.S)
 
 
 def _text_of(message: dict[str, Any]) -> str:
@@ -49,7 +54,15 @@ class RuleBasedLLM:
             return "handoff"
         if _KNOWLEDGE.search(text):
             return "knowledge"
+        if _OUT_OF_SCOPE.search(text):
+            return "out_of_scope"
+        if _SMALLTALK.search(text):
+            return "smalltalk"
         return "order"
+
+    async def rewrite_query(self, system: str, messages: list[dict[str, Any]]) -> str:
+        match = _LATEST.search(_text_of(messages[-1]))
+        return match["text"].strip() if match else ""
 
     async def respond(
         self,
@@ -63,6 +76,8 @@ class RuleBasedLLM:
             return _emit(self._summarize(messages), on_text)
 
         text = _text_of(last)
+        if not tools:
+            return _emit(self._answer_without_tools(text), on_text)
         order_match = _ORDER_ID.search(text)
         address_match = _ADDRESS.search(text)
         if order_match and address_match and "address" in text.lower():
@@ -83,6 +98,15 @@ class RuleBasedLLM:
         if "orders" in text.lower():
             return _tool_call("list_my_orders", {})
         return _emit("I can help you track orders or update a pending order's shipping address.", on_text)
+
+    @staticmethod
+    def _answer_without_tools(text: str) -> str:
+        source = _SOURCE.search(text)
+        if source is None:  # small talk / out of scope
+            return "I can help with your orders and with questions about our store policies."
+        body = source["text"].split("\n\n", 1)[-1]
+        first_sentence = body.split(". ")[0].rstrip(".")
+        return f"{first_sentence}. [{html.unescape(source['cite'])}]"
 
     @staticmethod
     def _summarize(messages: list[dict[str, Any]]) -> str:
