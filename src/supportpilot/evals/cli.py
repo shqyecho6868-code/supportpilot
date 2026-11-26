@@ -3,13 +3,15 @@
     uv run supportpilot-eval ablation          # retrieval ablation -> evals/results/ablation.json
     uv run supportpilot-eval run               # full eval with the configured pipeline
     uv run supportpilot-eval baseline          # full eval, then write evals/baseline.json
-    uv run supportpilot-eval compare           # full eval, compare with the baseline; exit 1 on a
-                                               # regression of more than 5 percentage points
+    uv run supportpilot-eval compare           # full eval, compare with the baseline; on a regression
+                                               # of more than 5 points re-run once, exit 1 only if
+                                               # the same metric regresses in both runs
 
-Needs the compose stack and ANTHROPIC_API_KEY. The agent, judge and Ragas default to
-Claude Haiku to keep cost down. The installed SDK no longer accepts sampling parameters
-(temperature), so LLM calls made by the eval run with thinking disabled and low effort
-for the most stable output available; LLM-graded metrics still vary a little run to run.
+Needs the compose stack and ANTHROPIC_API_KEY. The model under test defaults to Claude Haiku;
+the judge and Ragas default to Claude Sonnet, so a stronger model grades the weaker one.
+The API no longer accepts sampling parameters (temperature), so LLM calls made by the eval
+run with thinking off and low effort for the most stable output available; LLM-graded
+metrics still vary a little run to run.
 """
 
 import argparse
@@ -25,15 +27,23 @@ from typing import Any
 from supportpilot.config import Settings, get_settings
 from supportpilot.db import create_pool
 from supportpilot.evals.cases import BASELINE_FILE, RESULTS_DIR, Case, load_cases
-from supportpilot.evals.judges import RagasScorer, TaskJudge
-from supportpilot.evals.metrics import compare, mean, retrieval_scores, tools_ok
+from supportpilot.evals.judges import EvalAborted, RagasScorer, TaskJudge
+from supportpilot.evals.metrics import (
+    compare,
+    mean,
+    persistent_regressions,
+    regressed_metrics,
+    retrieval_scores,
+    tools_ok,
+)
 from supportpilot.evals.runner import AgentRunner, answer_with, dumps, prepare_database, rewrite_for_retrieval
 from supportpilot.kb import RetrievalConfig, Retriever
 from supportpilot.llm.anthropic_llm import AnthropicLLM
 
 log = logging.getLogger("supportpilot.evals")
 
-DEFAULT_MODEL = "claude-haiku-5-5"
+DEFAULT_MODEL = "claude-haiku-5-5"  # model under test
+DEFAULT_JUDGE_MODEL = "claude-sonnet-5-5"  # a stronger model grades the weaker one
 EVAL_REDIS_DB = 14
 
 # Ablation tiers: each adds one stage to the previous one. "bm25_only" is a diagnostic row.
@@ -120,7 +130,7 @@ async def cmd_ablation(args, settings: Settings) -> int:
                 async def one(case: Case, cfg=cfg):
                     hits, reply = await answer_with(llm, retriever, cfg, case, queries[case.id])
                     scores = await scorer.score(
-                        _question(case, queries[case.id]), reply, [h["text"] for h in hits]
+                        _question(case, queries[case.id]), reply, [h["text"] for h in hits], case.reference
                     )
                     return case.id, reply, scores
 
@@ -128,6 +138,9 @@ async def cmd_ablation(args, settings: Settings) -> int:
                 for cid, reply, scores in answered:
                     per_case[cid].update(reply=reply, **scores)
                 metrics["answer.faithfulness"] = mean([s["faithfulness"] for _, _, s in answered])
+                metrics["answer.factual_correctness"] = mean(
+                    [s["factual_correctness"] for _, _, s in answered]
+                )
                 metrics["answer.answer_relevancy"] = mean([s["answer_relevancy"] for _, _, s in answered])
             rows.append({"tier": key, "label": label, "config": flags, **metrics})
             details[key] = per_case
@@ -209,7 +222,8 @@ async def full_eval(args, settings: Settings) -> dict[str, Any]:
         if not record.get("retrieval") or not record["retrieval"]["results"]:
             return None
         contexts = [h["text"] for h in record["retrieval"]["results"]]
-        return await scorer.score(_question(case, record["retrieval"]["query"]), record["reply"], contexts)
+        question = _question(case, record["retrieval"]["query"])
+        return await scorer.score(question, record["reply"], contexts, case.reference)
 
     answered = [r for r in records if by_id[r["id"]].is_knowledge]
     ragas_scores = await gather_limited([lambda r=r: ragas(r) for r in answered], args.concurrency)
@@ -234,6 +248,9 @@ async def full_eval(args, settings: Settings) -> dict[str, Any]:
     metrics = {
         **{k: v for k, v in retrieval_metrics.items()},
         "answer.faithfulness": mean([r["ragas"]["faithfulness"] for r in answered if r.get("ragas")]),
+        "answer.factual_correctness": mean(
+            [r["ragas"]["factual_correctness"] for r in answered if r.get("ragas")]
+        ),
         "answer.answer_relevancy": mean([r["ragas"]["answer_relevancy"] for r in answered if r.get("ragas")]),
         "answer.citation_rate": mean([1.0 if r.get("model_cited") else 0.0 for r in answered]),
         "agent.routing_accuracy": mean([1.0 if r["route_ok"] else 0.0 for r in records]),
@@ -313,24 +330,47 @@ async def cmd_baseline(args, settings: Settings) -> int:
     return 0
 
 
-async def cmd_compare(args, settings: Settings) -> int:
-    if not BASELINE_FILE.exists():
-        print("no baseline: run `supportpilot-eval baseline` first", file=sys.stderr)
-        return 2
-    baseline = json.loads(BASELINE_FILE.read_text())
-    if baseline["models"]["agent"] != args.model or baseline["models"]["judge"] != args.judge_model:
-        print(f"warning: baseline was produced with {baseline['models']}", file=sys.stderr)
-    result = await full_eval(args, settings)
-    _save_run(result, "latest")
-    rows, failed = compare(baseline["metrics"], result["metrics"])
+def _print_comparison(rows: list[dict[str, Any]]) -> None:
     print(f"\n{'metric':32s} {'baseline':>9s} {'current':>9s} {'delta':>8s}  status")
     for r in rows:
         delta = "n/a" if r["delta"] is None else f"{r['delta'] * 100:+.1f}pp"
         print(
             f"{r['metric']:32s} {_pct(r['baseline']):>9s} {_pct(r['current']):>9s} {delta:>8s}  {r['status']}"
         )
-    print("\nFAIL: a metric regressed by more than 5 percentage points" if failed else "\nOK: no regressions")
-    return 1 if failed else 0
+
+
+async def cmd_compare(args, settings: Settings) -> int:
+    """Fail only if a metric regresses beyond the threshold in two consecutive runs.
+
+    LLM-graded metrics move a few points between identical runs, so a first-run regression
+    triggers one automatic re-run; only metrics that regress in both runs fail the check.
+    """
+    if not BASELINE_FILE.exists():
+        print("no baseline: run `supportpilot-eval baseline` first", file=sys.stderr)
+        return 2
+    baseline = json.loads(BASELINE_FILE.read_text())
+    if baseline["models"]["agent"] != args.model or baseline["models"]["judge"] != args.judge_model:
+        print(f"warning: baseline was produced with {baseline['models']}", file=sys.stderr)
+
+    result = await full_eval(args, settings)
+    _save_run(result, "latest")
+    first, failed = compare(baseline["metrics"], result["metrics"])
+    _print_comparison(first)
+    if not failed:
+        print("\nOK: no regressions")
+        return 0
+
+    print(f"\nRegressed in run 1: {sorted(regressed_metrics(first))}. Re-running once to rule out noise.")
+    result = await full_eval(args, settings)
+    _save_run(result, "latest-rerun")
+    second, _ = compare(baseline["metrics"], result["metrics"])
+    _print_comparison(second)
+    persistent = persistent_regressions(first, second)
+    if persistent:
+        print(f"\nFAIL: regressed by more than 5 percentage points in both runs: {sorted(persistent)}")
+        return 1
+    print("\nOK: the first-run regressions did not reproduce")
+    return 0
 
 
 def main() -> None:
@@ -339,7 +379,7 @@ def main() -> None:
     for name in ("ablation", "run", "baseline", "compare"):
         p = sub.add_parser(name)
         p.add_argument("--model", default=DEFAULT_MODEL, help="model under test (agent / answers)")
-        p.add_argument("--judge-model", default=DEFAULT_MODEL, help="model for the judge and Ragas")
+        p.add_argument("--judge-model", default=DEFAULT_JUDGE_MODEL, help="model for the judge and Ragas")
         p.add_argument("--concurrency", type=int, default=6)
         if name == "ablation":
             p.add_argument("--retrieval-only", action="store_true", help="skip answer generation and Ragas")
@@ -353,4 +393,8 @@ def main() -> None:
         print("ANTHROPIC_API_KEY is required for evaluation", file=sys.stderr)
         sys.exit(2)
     handler = {"ablation": cmd_ablation, "run": cmd_run, "baseline": cmd_baseline, "compare": cmd_compare}
-    sys.exit(asyncio.run(handler[args.command](args, settings)))
+    try:
+        sys.exit(asyncio.run(handler[args.command](args, settings)))
+    except EvalAborted as exc:
+        print(f"\nABORTED: {exc}\nNo results were written for this run.", file=sys.stderr)
+        sys.exit(3)

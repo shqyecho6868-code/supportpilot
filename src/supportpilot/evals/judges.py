@@ -2,8 +2,10 @@
 
 * Task completion: a Claude judge compares the agent's behaviour with the case's
   reference description (structured output, thinking off, low effort).
-* Faithfulness and answer relevancy: Ragas 0.4 metrics, using Claude through
-  ``ragas.llms.llm_factory`` and the local bge-small embedding model.
+* Faithfulness, factual correctness and answer relevancy: Ragas 0.4 metrics, using Claude
+  through ``ragas.llms.llm_factory`` and the local bge-small embedding model.
+
+The grader should be a stronger model than the one under test (default: Sonnet grades Haiku).
 """
 
 import asyncio
@@ -41,6 +43,36 @@ _JUDGE_SCHEMA = {
 }
 
 
+class EvalAborted(RuntimeError):
+    """An error that would corrupt every later result (no credit, bad key): stop the run."""
+
+
+def raise_if_fatal(exc: BaseException) -> None:
+    """Re-raise account-level API errors, which may be wrapped by instructor / Ragas."""
+    seen: BaseException | None = exc
+    while seen is not None:
+        if isinstance(seen, anthropic.AuthenticationError | anthropic.PermissionDeniedError):
+            raise EvalAborted(str(seen)) from exc
+        if isinstance(seen, anthropic.BadRequestError) and "credit balance" in str(seen):
+            raise EvalAborted(str(seen)) from exc
+        seen = seen.__cause__ or seen.__context__
+    if "credit balance is too low" in str(exc):  # instructor may flatten the chain into text
+        raise EvalAborted(str(exc)) from exc
+
+
+def thinking_off(model: str) -> dict[str, Any] | None:
+    """The request's `thinking` value that turns thinking off for this model, if it can be turned off.
+
+    Sonnet 5.5 rejects {"type": "disabled"} and uses "between_tools" instead; Opus 5.5 cannot turn
+    thinking off at all (None: leave the parameter out and rely on low effort).
+    """
+    if model.startswith("claude-opus-5-5") or model.startswith("claude-fable"):
+        return None
+    if model.startswith("claude-sonnet-5-5"):
+        return {"type": "between_tools"}
+    return {"type": "disabled"}
+
+
 def strip_citations(reply: str) -> str:
     return _CITATION.sub("", _SOURCES_FOOTER.sub("", reply)).strip()
 
@@ -75,7 +107,7 @@ class TaskJudge:
             max_tokens=1024,
             system=JUDGE_PROMPT,
             messages=[{"role": "user", "content": body}],
-            thinking={"type": "disabled"},
+            **({"thinking": t} if (t := thinking_off(self.model)) else {}),
             output_config={"effort": "low", "format": {"type": "json_schema", "schema": _JUDGE_SCHEMA}},
         )
         text = "".join(b.text for b in response.content if b.type == "text")
@@ -112,32 +144,50 @@ class _FastEmbedEmbeddings:
 class RagasScorer:
     def __init__(self, model: str, embedding_model: str, api_key: str | None = None):
         from ragas.llms import llm_factory
-        from ragas.metrics.collections import AnswerRelevancy, Faithfulness
+        from ragas.metrics.collections import AnswerRelevancy, FactualCorrectness, Faithfulness
 
         self.model = model
+        extra = {"thinking": t} if (t := thinking_off(model)) else {}
         llm = llm_factory(
             model,
             provider="anthropic",
             client=anthropic.AsyncAnthropic(api_key=api_key),
             max_tokens=4096,
-            thinking={"type": "disabled"},
+            **extra,
         )
         self._faithfulness = Faithfulness(llm=llm)
+        # Recall mode: share of the reference's claims the answer states. Extra correct detail is
+        # not penalised (faithfulness already covers unsupported claims).
+        self._factual = FactualCorrectness(llm=llm, mode="recall")
         self._relevancy = AnswerRelevancy(llm=llm, embeddings=_FastEmbedEmbeddings(embedding_model))
 
-    async def score(self, question: str, reply: str, contexts: list[str]) -> dict[str, float | None]:
+    async def score(
+        self, question: str, reply: str, contexts: list[str], reference: str
+    ) -> dict[str, float | None]:
         answer = strip_citations(reply)
-        out: dict[str, float | None] = {"faithfulness": None, "answer_relevancy": None}
+        out: dict[str, float | None] = {
+            "faithfulness": None,
+            "factual_correctness": None,
+            "answer_relevancy": None,
+        }
         try:
             r = await self._faithfulness.ascore(
                 user_input=question, response=answer, retrieved_contexts=contexts
             )
             out["faithfulness"] = r.value
         except Exception as exc:  # noqa: BLE001 - one failed metric must not sink the run
+            raise_if_fatal(exc)
             log.warning("faithfulness failed: %s", exc)
+        try:
+            r = await self._factual.ascore(response=answer, reference=reference)
+            out["factual_correctness"] = r.value
+        except Exception as exc:  # noqa: BLE001
+            raise_if_fatal(exc)
+            log.warning("factual correctness failed: %s", exc)
         try:
             r = await self._relevancy.ascore(user_input=question, response=answer)
             out["answer_relevancy"] = r.value
         except Exception as exc:  # noqa: BLE001
+            raise_if_fatal(exc)
             log.warning("answer relevancy failed: %s", exc)
         return out

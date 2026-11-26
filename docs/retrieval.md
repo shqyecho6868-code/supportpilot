@@ -79,6 +79,8 @@ them. The eval reports `answer.citation_rate`: how often the model cited by itse
 ## Sampling parameters
 
 The installed `anthropic` SDK (2.14, API version 2026-10-21) no longer accepts `temperature`,
-`top_p` or `top_k`, so "temperature 0" cannot be set. Query rewriting, chunk contexts, the eval
-judge and Ragas run with thinking disabled and `effort: low` instead, the most stable setting
-available. LLM-graded metrics still move by a few points between runs.
+`top_p` or `top_k` (they return 400 on every model under that version, and Haiku 5.5 / Sonnet 5.5
+reject non-default values even on older versions), so "temperature 0" cannot be set. Query
+rewriting, chunk contexts, the eval judge and Ragas run with thinking off and `effort: low`
+instead, the most stable setting available (Sonnet 5.5 turns thinking off with `between_tools`;
+Opus 5.5 cannot turn it off). LLM-graded metrics still move by a few points between runs.

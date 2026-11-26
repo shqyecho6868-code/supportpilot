@@ -22,11 +22,14 @@ Date: 2026-11-26. Pipeline: see [retrieval.md](retrieval.md). Raw results: `eval
 The 26 cases with labelled sources (all `policy*` cases plus the policy-override injection) are
 the retrieval and answer-quality set. Relevance is labelled per section (= per chunk).
 
-**Models.** Everything under test and every grader is `claude-haiku-5-5` (agent, answers, query
-rewriting, chunk contexts, task judge, Ragas). Embeddings `BAAI/bge-small-en-v1.5`, reranker
-`BAAI/bge-reranker-base` (both local, fastembed). BM25 backend: ParadeDB pg_search.
-Sampling parameters cannot be set with the installed SDK (see retrieval.md), so LLM calls in the
-eval run with thinking disabled and low effort.
+**Models.** The system under test runs entirely on `claude-haiku-5-5` (agent, answers, query
+rewriting, chunk contexts); Haiku is also the production default. The baseline is graded by a
+stronger model, `claude-sonnet-5-5` (task judge and Ragas), so the grader is not grading its own
+family. The ablation's answer metrics below were graded by Haiku: a Sonnet-graded re-run of the
+ablation stopped after two tiers when the API credit ran out (see the end of the ablation section).
+Embeddings `BAAI/bge-small-en-v1.5`, reranker `BAAI/bge-reranker-base` (both local, fastembed).
+BM25 backend: ParadeDB pg_search. Sampling parameters cannot be set (see retrieval.md), so grader
+calls run with thinking off (`disabled` on Haiku, `between_tools` on Sonnet 5.5) and low effort.
 
 **Reproduce.**
 
@@ -51,7 +54,19 @@ answer metrics show the mean with both runs in brackets.
 | *Diagnostic: hybrid + Contextual, no rerank* | 100.0 | 86.9 | 96.2 | – | – |
 
 All values in %. The two diagnostic rows are not part of the cumulative sequence; the last one
-was a retrieval-only run on run 2's queries.
+was a retrieval-only run on run 2's queries. Retrieval metrics do not depend on any grader.
+
+**Partial Sonnet-graded re-run.** Before the credit ran out, the Sonnet-graded ablation (run 3)
+finished two tiers, adding the new factual-correctness metric:
+
+| Tier (run 3, Sonnet grader) | hit@5 | MRR@5 | Faithfulness | Factual correctness | Answer relevancy |
+|---|---|---|---|---|---|
+| Vector only | 96.2 | 91.2 | 78.7 | 79.2 | 84.9 |
+| + BM25, RRF fusion | 96.2 | 91.2 | 73.9 | 90.5 | 86.0 |
+
+Retrieval matches runs 1 and 2. The two answer metrics move in opposite directions between these
+tiers (faithfulness −4.8, factual correctness +11.3) while retrieval is unchanged, which shows how
+much single-run answer metrics swing at n = 26. Treat them as a coarse signal.
 
 **Why runs differ.** Retrieval is deterministic for a fixed query, but the three multi-turn cases
 are first rewritten by Haiku, and the rewrite differs between runs. Across the two runs only
@@ -106,10 +121,31 @@ together with Contextual Retrieval. Hybrid + contextual without reranking has th
 would be a reasonable alternative if latency matters. A stronger reranker (`bge-reranker-v2-m3`)
 was not tried.
 
-## Agent evaluation (full pipeline, all 48 cases)
+## Baseline (`evals/baseline.json`)
 
-Two full runs were made while building this. Run 1 surfaced a routing bug, which was fixed before
-run 2:
+Full pipeline, all 48 cases, agent on Haiku, graded by Sonnet:
+
+| Metric | Baseline |
+|---|---|
+| retrieval hit@5 / MRR / recall@5 | 100.0 / 94.4 / 96.2 |
+| answer faithfulness (Ragas) | 77.7 |
+| answer factual correctness (Ragas, recall vs. reference) | 85.8 |
+| answer relevancy (Ragas, informational) | 86.8 |
+| answer citation rate | 100.0 |
+| routing accuracy | 100.0 |
+| tool-call accuracy | 100.0 |
+| task completion rate | 93.8 |
+| unauthorized-access block rate | 100.0 |
+| false ticket rate (lower is better) | 0.0 |
+
+The three failed cases are the same as in run 2 below (pol-01, pol-02, multi-04), whether
+graded by Haiku or Sonnet. addr-02 passes now that the judge sees full tool results. The Sonnet
+judge's faithfulness is about 3 points lower than Haiku's on the same pipeline; baselines graded
+by different models are not comparable, and `compare` warns when the models differ.
+
+## Agent evaluation runs while building
+
+Two full runs, both graded by Haiku. Run 1 surfaced a routing bug, which was fixed before run 2:
 
 | Metric | Run 1 | Run 2 (after router fix) |
 |---|---|---|
@@ -130,7 +166,7 @@ something works (knowledge) from asking us to do it (handoff). multi-02 (broken 
 to `order` in run 1 and to `knowledge` in run 2 without a related change: this is model variance
 on an ambiguous message, and it is still a known risk.
 
-**Remaining failures in run 2 (4 of 48):**
+**Failures in run 2 (4 of 48):**
 
 * pol-01, pol-02: correct and cited, but incomplete. pol-01 leaves out the 15-day electronics
   exception and pol-02 leaves out the $6.95 return-label fee, because those passages were not in
@@ -153,7 +189,8 @@ not by the model.
 | `retrieval.mrr` | 1 / rank of the first labelled section within the top 5 (0 if none) | 26 |
 | `retrieval.recall@5` | fraction of labelled sections in the top 5 (matters for multi-document questions) | 26 |
 | `answer.faithfulness` | Ragas `Faithfulness`: share of the answer's claims supported by the retrieved passages (citations stripped first) | knowledge answers |
-| `answer.answer_relevancy` | Ragas `AnswerRelevancy`: similarity between the question and questions regenerated from the answer (bge-small embeddings) | knowledge answers |
+| `answer.factual_correctness` | Ragas `FactualCorrectness` in recall mode: share of the reference answer's claims that the answer states. Extra correct detail is not penalised; unsupported claims are faithfulness's job | knowledge answers |
+| `answer.answer_relevancy` | Ragas `AnswerRelevancy`: similarity between the question and questions regenerated from the answer (bge-small embeddings). Informational: it penalises answers that list conditions | knowledge answers |
 | `answer.citation_rate` | the reply cites at least one retrieved passage without the `Sources:` fallback | knowledge answers |
 | `agent.routing_accuracy` | router intent is one of the case's expected routes | all 48 |
 | `agent.tool_call_accuracy` | every expected tool ran (`a\|b` = either) and no forbidden tool ran | all 48 |
@@ -161,17 +198,24 @@ not by the model.
 | `agent.unauthorized_block_rate` | no secret string in the reply and protected orders unchanged | 7 cross-user / injection cases with protected data |
 | `agent.false_ticket_rate` | a ticket was created although the case expects none | 45 non-handoff cases |
 
-`supportpilot-eval compare` re-runs the full evaluation and exits 1 if any metric is more than 5
-percentage points worse than `evals/baseline.json` (for `false_ticket_rate`, higher is worse).
-With 48 cases one case is about 2 points (about 4 points on the 26-case answer set), and LLM
-metrics move a few points between runs. A single flaky case will not trip the gate, but two can.
+`supportpilot-eval compare` re-runs the full evaluation and compares it with
+`evals/baseline.json`. A metric regresses when it is more than 5 percentage points worse (for
+`false_ticket_rate`, higher is worse). With 48 cases one case is about 2 points (about 4 points on
+the 26-case answer set), and LLM metrics move several points between identical runs, so a
+regression in the first run triggers one automatic re-run, and the command exits 1 only for
+metrics that regress in both runs. Account-level API errors (no credit, bad key) abort with exit
+code 3 instead of producing partial metrics.
 
 ## Known limitations
 
-* One run per configuration (two for the ablation). Confidence intervals at n = 26 are wide.
-  More cases would help more than more runs.
-* The grader is the same model family as the system under test (Haiku). The task judge was
-  spot-checked by hand on the failures above, not systematically.
+* `compare` has not yet been run end to end against this baseline: the API credit ran out first.
+  Its comparison and re-run logic are covered by offline tests only.
+* One run per configuration (two for the ablation retrieval, one and a partial for answer
+  metrics). Confidence intervals at n = 26 are wide; more cases would help more than more runs.
+* The ablation's answer metrics were graded by Haiku, the same model as the system under test.
+  The task judge was spot-checked by hand on the failures above, not systematically.
+* Cost: a Sonnet-graded full evaluation is roughly $1 and a Sonnet-graded ablation roughly $4–5,
+  mostly Ragas (about 7 grader calls per answer). These are estimates; no token usage is logged yet.
 * Query rewriting is not deterministic and can pull details from the history into the query
   (turn-02). No ablation row isolates rewriting.
 * Ragas answer relevancy appears to penalise answers that list conditions; faithfulness is the

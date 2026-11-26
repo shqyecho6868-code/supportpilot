@@ -21,6 +21,7 @@ from redis.asyncio import Redis
 
 from supportpilot.db import create_pool, reset_database
 from supportpilot.evals.cases import Case
+from supportpilot.evals.judges import raise_if_fatal
 from supportpilot.graph import GraphDeps, build_graph
 from supportpilot.graph.builder import _rewrite_input, _sources_message, cited_sources
 from supportpilot.graph.prompts import KNOWLEDGE_AGENT_PROMPT, QUERY_REWRITE_PROMPT
@@ -94,6 +95,7 @@ class AgentRunner:
         try:
             return await self._run(case, pool, redis)
         except Exception as exc:  # noqa: BLE001 - record the failure, keep evaluating
+            raise_if_fatal(exc)
             log.exception("case %s crashed", case.id)
             return {
                 "id": case.id,

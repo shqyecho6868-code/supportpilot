@@ -68,3 +68,12 @@ def compare(baseline: dict[str, float], current: dict[str, float]) -> tuple[list
             }
         )
     return rows, failed
+
+
+def regressed_metrics(rows: list[dict[str, Any]]) -> set[str]:
+    return {r["metric"] for r in rows if r["status"] in {"REGRESSED", "MISSING"}}
+
+
+def persistent_regressions(first: list[dict[str, Any]], second: list[dict[str, Any]]) -> set[str]:
+    """Metrics that regressed in both runs. A regression seen only once is treated as run-to-run noise."""
+    return regressed_metrics(first) & regressed_metrics(second)

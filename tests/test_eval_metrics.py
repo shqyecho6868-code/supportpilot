@@ -1,7 +1,12 @@
 """Offline checks of the evaluation metrics and the baseline comparison used by CI."""
 
+import anthropic
+import httpx
+import pytest
+
 from supportpilot.evals.cases import Case, load_cases
-from supportpilot.evals.metrics import compare, retrieval_scores, tools_ok
+from supportpilot.evals.judges import EvalAborted, raise_if_fatal
+from supportpilot.evals.metrics import compare, persistent_regressions, retrieval_scores, tools_ok
 from supportpilot.kb.documents import chunk_document, load_documents
 
 
@@ -58,3 +63,21 @@ def test_compare_flags_drops_over_five_points_in_either_direction_of_goodness():
         baseline, {"agent.routing_accuracy": 0.9, "agent.false_ticket_rate": 0.10, "retrieval.mrr": 0.8}
     )
     assert failed and {r["metric"] for r in rows if r["status"] == "REGRESSED"} == {"agent.false_ticket_rate"}
+
+
+def test_only_regressions_seen_in_both_runs_fail():
+    baseline = {"agent.routing_accuracy": 0.90, "answer.faithfulness": 0.80}
+    first, _ = compare(baseline, {"agent.routing_accuracy": 0.80, "answer.faithfulness": 0.70})
+    second, _ = compare(baseline, {"agent.routing_accuracy": 0.82, "answer.faithfulness": 0.79})
+    assert persistent_regressions(first, second) == {"agent.routing_accuracy"}
+
+
+def test_account_errors_abort_the_run_even_when_wrapped():
+    response = httpx.Response(400, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    credit = anthropic.BadRequestError("Your credit balance is too low", response=response, body=None)
+    try:
+        raise RuntimeError("instructor retry failed") from credit
+    except RuntimeError as wrapped:
+        with pytest.raises(EvalAborted):
+            raise_if_fatal(wrapped)
+    raise_if_fatal(ValueError("a parsing problem"))  # ordinary failures do not abort
