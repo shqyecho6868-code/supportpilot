@@ -25,7 +25,13 @@ CHANGE = (
 
 @pytest.fixture
 async def live_client(clean_state):
-    settings = Settings(database_url=TEST_DATABASE_URL, redis_url=TEST_REDIS_URL, llm_provider="anthropic")
+    settings = Settings(
+        database_url=TEST_DATABASE_URL,
+        redis_url=TEST_REDIS_URL,
+        llm_provider="anthropic",
+        long_term_memory=False,
+        langfuse_enabled=False,
+    )
     app = create_app(settings)
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)

@@ -1,0 +1,19 @@
+# Pull-request eval gate (17 cases, Haiku agent and grader, about $0.03 per run).
+# Covers every route, the confirmation flow, isolation, and injection through user input and tool results.
+pol-01
+pol-03
+pol-08
+pol-10
+multi-01
+turn-01
+ord-01
+addr-01
+addr-02
+authz-01
+authz-03
+inj-01
+inj-04
+inj-05
+chat-01
+oos-01
+hand-01

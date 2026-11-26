@@ -29,8 +29,10 @@ from supportpilot.kb import RetrievalConfig, Retriever
 from supportpilot.kb.contextualize import Contextualizer
 from supportpilot.kb.ingest import ingest
 from supportpilot.llm import LLMClient
+from supportpilot.llm.usage import metered
 from supportpilot.mcp_server import build_mcp_server
 from supportpilot.memory import ConversationMemory
+from supportpilot.observability import get_tracer
 from supportpilot.tools import ToolGateway, ToolResult
 
 log = logging.getLogger(__name__)
@@ -55,14 +57,20 @@ async def prepare_database(server_url: str, fast_model: str, embedding_model: st
 
 
 class RecordingGateway(ToolGateway):
-    def __init__(self, server):
-        super().__init__(server)
+    def __init__(self, server, *, guard: bool = True):
+        super().__init__(server, guard=guard)
         self.calls: list[dict[str, Any]] = []
 
     async def call(self, name, arguments, *, user_id, idempotency_key=None) -> ToolResult:
         result = await super().call(name, arguments, user_id=user_id, idempotency_key=idempotency_key)
         self.calls.append(
-            {"name": name, "args": arguments, "is_error": result.is_error, "result": result.content}
+            {
+                "name": name,
+                "args": arguments,
+                "is_error": result.is_error,
+                "result": result.content,
+                "injection_flags": list(result.injection_flags),
+            }
         )
         return result
 
@@ -85,6 +93,10 @@ class AgentRunner:
     llm: LLMClient
     retrieval: RetrievalConfig
     query_rewrite: bool = True
+    agentic_rag: bool = False
+    injection_guard: bool = True
+    trace_tags: tuple[str, ...] = ()
+    run_id: str = ""
 
     async def run_case(self, case: Case) -> dict[str, Any]:
         await reset_database(self.database_url)
@@ -93,7 +105,22 @@ class AgentRunner:
         pool = create_pool(self.database_url, max_size=4)
         await pool.open(wait=True)
         try:
-            return await self._run(case, pool, redis)
+            with (
+                metered() as meter,
+                get_tracer().trace(
+                    f"eval:{case.id}",
+                    user_id=case.user_id,
+                    session_id=self.run_id or None,
+                    tags=["eval", f"category:{case.category}", *self.trace_tags],
+                    metadata={"case_id": case.id, "run_id": self.run_id},
+                    input=case.message,
+                ) as root,
+            ):
+                record = await self._run(case, pool, redis)
+                record["usage"] = meter.summary()
+                record["trace_id"] = get_tracer().trace_id()
+                root.update(output=record["reply"], metadata={"route": record["route"], **record["usage"]})
+            return record
         except Exception as exc:  # noqa: BLE001 - record the failure, keep evaluating
             raise_if_fatal(exc)
             log.exception("case %s crashed", case.id)
@@ -104,6 +131,7 @@ class AgentRunner:
                 "tools": [],
                 "reply": "",
                 "retrieval": None,
+                "injection_flags": {"user_input": [], "tool_results": []},
             }
         finally:
             await pool.close()
@@ -117,9 +145,18 @@ class AgentRunner:
         for user, assistant in zip(history[::2], history[1::2], strict=True):
             await memory.append_turn(session_id, user["content"], assistant["content"])
 
-        gateway = RecordingGateway(build_mcp_server(pool, Retriever(pool, self.retrieval)))
+        gateway = RecordingGateway(
+            build_mcp_server(pool, Retriever(pool, self.retrieval)), guard=self.injection_guard
+        )
         graph = build_graph(
-            GraphDeps(llm=self.llm, tools=gateway, memory=memory, query_rewrite=self.query_rewrite),
+            GraphDeps(
+                llm=self.llm,
+                tools=gateway,
+                memory=memory,
+                query_rewrite=self.query_rewrite,
+                agentic_rag=self.agentic_rag,
+                injection_guard=self.injection_guard,
+            ),
             InMemorySaver(),
         )
         watched = tuple(
@@ -138,9 +175,12 @@ class AgentRunner:
         }
         started = time.monotonic()
         route = None
+        guard_flags: list[str] = []
         async for chunk in graph.astream(initial, config, stream_mode="custom"):
             if chunk["type"] == "route":
                 route = chunk["intent"]
+            elif chunk["type"] == "guard":
+                guard_flags.extend(chunk["matches"])
         state = await graph.aget_state(config)
         confirmation = None
         # Auto-approve confirmations (at most a few, in case the agent chains changes).
@@ -169,6 +209,10 @@ class AgentRunner:
                 retrieval and cited_sources(reply.split("\n\nSources: ")[0], retrieval["results"])
             ),
             "seconds": round(time.monotonic() - started, 2),
+            "injection_flags": {
+                "user_input": guard_flags,
+                "tool_results": sorted({f for t in gateway.calls for f in t["injection_flags"]}),
+            },
         }
 
 

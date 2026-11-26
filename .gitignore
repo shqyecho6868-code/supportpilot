@@ -14,3 +14,4 @@ build/
 .vscode/
 .DS_Store
 evals/results/
+.mem0/

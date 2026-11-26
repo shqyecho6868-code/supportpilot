@@ -35,6 +35,10 @@ def stream_chat(client: httpx.Client, user: str, session: str, message: str) -> 
                     print(f"[route: {data['intent']}] ", end="", flush=True)
                 elif event == "sources":
                     print(f"[search: {data['query']!r}] ", end="", flush=True)
+                elif event == "guard":
+                    print(f"[guard: {', '.join(data['matches'])}] ", end="", flush=True)
+                elif event == "usage":
+                    print(f"\n[tokens: turn {data['turn_tokens']}, session {data['session_tokens']}]", end="")
                 elif event == "confirmation_required":
                     confirmation = data
                 elif event == "error":
@@ -48,7 +52,8 @@ def send_confirm(client: httpx.Client, user: str, thread_id: str, decision: str)
         "/confirm", json={"thread_id": thread_id, "decision": decision}, headers={"X-User-Id": user}
     )
     if resp.status_code != 200:
-        print(f"[HTTP {resp.status_code}] {resp.json().get('detail')}")
+        detail = resp.json().get("detail")
+        print(f"[HTTP {resp.status_code}] {detail['message'] if isinstance(detail, dict) else detail}")
         return
     body = resp.json()
     print(body.get("reply") or json.dumps(body, indent=2))
@@ -88,6 +93,7 @@ def main() -> None:
                 print(f"  order:   {confirmation['order_id']}")
                 print(f"  current: {confirmation['current_address']}")
                 print(f"  new:     {confirmation['new_address']}")
+                print(f"  expires: {confirmation.get('expires_at')}")
                 print(f"  thread:  {confirmation['thread_id']}")
                 choice = input("approve / reject / skip? ").strip().lower()
                 if choice in ("approve", "reject"):

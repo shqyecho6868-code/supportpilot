@@ -3,18 +3,23 @@
 The gateway is the only place tool calls are executed. It:
   * injects the authenticated user id into MCP request ``_meta``,
   * hides orchestrator-owned parameters (the idempotency key) from the model,
-  * declares which tools need human confirmation before they run.
+  * declares which tools need human confirmation before they run,
+  * screens every result with the prompt-injection guard,
+  * records every call as a Langfuse tool observation.
 """
 
 import copy
 import json
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from mcp import Client
 from mcp.server.mcpserver import MCPServer
 
+from supportpilot.guard import screen_tool_result
 from supportpilot.mcp_server import IDEMPOTENCY_KEY_PARAM, USER_ID_META_KEY
+from supportpilot.observability import get_tracer
 
 # Tools that change customer data. The graph pauses for confirmation before running them.
 CONFIRMATION_REQUIRED = frozenset({"update_address"})
@@ -31,6 +36,8 @@ ORCHESTRATOR_PARAMS: dict[str, frozenset[str]] = {"update_address": frozenset({I
 class ToolResult:
     content: str
     is_error: bool
+    # Injection-guard pattern names that matched the raw result (empty if clean).
+    injection_flags: tuple[str, ...] = field(default=())
 
     def as_dict(self) -> dict[str, Any]:
         try:
@@ -50,8 +57,9 @@ def _strip_params(schema: dict[str, Any], hidden: frozenset[str]) -> dict[str, A
 
 
 class ToolGateway:
-    def __init__(self, server: MCPServer):
+    def __init__(self, server: MCPServer, *, guard: bool = True):
         self._server = server
+        self._guard = guard
         self._model_tools: list[dict[str, Any]] | None = None
 
     async def model_tools(self, names: frozenset[str] | None = None) -> list[dict[str, Any]]:
@@ -94,7 +102,22 @@ class ToolGateway:
                 raise ValueError(f"{name} requires an idempotency key")
             args[IDEMPOTENCY_KEY_PARAM] = idempotency_key
 
-        async with Client(self._server) as client:
-            result = await client.call_tool(name, args, meta={USER_ID_META_KEY: user_id})
-        text = "\n".join(getattr(block, "text", "") for block in result.content)
-        return ToolResult(content=text, is_error=bool(result.is_error))
+        with get_tracer().span(f"tool:{name}", as_type="tool", input=args) as obs:
+            started = time.monotonic()
+            async with Client(self._server) as client:
+                result = await client.call_tool(name, args, meta={USER_ID_META_KEY: user_id})
+            text = "\n".join(getattr(block, "text", "") for block in result.content)
+            flags: tuple[str, ...] = ()
+            if self._guard and not result.is_error:
+                text, verdict = screen_tool_result(name, text)
+                flags = verdict.matches
+            obs.update(
+                output=text[:8000],
+                level="ERROR" if result.is_error else ("WARNING" if flags else None),
+                metadata={
+                    "is_error": bool(result.is_error),
+                    "injection_flags": list(flags),
+                    "seconds": round(time.monotonic() - started, 3),
+                },
+            )
+        return ToolResult(content=text, is_error=bool(result.is_error), injection_flags=flags)

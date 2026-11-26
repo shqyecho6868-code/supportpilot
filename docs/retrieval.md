@@ -34,6 +34,30 @@ Every stage is a setting (environment variable or `.env`), read into `RetrievalC
 
 At least one of vector and BM25 must be on. With only one of them, fusion keeps its order.
 
+## Agentic RAG (optional, `AGENTIC_RAG=true`)
+
+The default knowledge agent is single-shot: rewrite (follow-ups only), search once, answer. With
+agentic RAG the agent controls retrieval itself, with Haiku making each decision through a small
+structured-output call (thinking off, low effort):
+
+```
+decide   -- retrieval_decision: does this message need a policy search? (a first message always
+            searches; a follow-up such as "thanks" or one already answered in the conversation may
+            skip it). Also writes the standalone query.
+search   -- search_policy(query), same hybrid pipeline as above
+grade    -- retrieval_grade: are the passages enough for a complete answer, including the
+            conditions (membership, product category, fees, days)? If not: what is missing, and a
+            new query aimed at it
+rewrite  -- search again with that query (at most AGENTIC_RAG_MAX_REWRITES = 2 extra searches;
+            the last search is not graded, and a repeated query stops the loop)
+answer   -- from the union of all passages found (at most 10), citing [Document § Section]
+```
+
+Every decision, query and passage list is recorded in the turn's state and Langfuse trace. It
+costs 2 to 4 extra Haiku calls per policy question. It is off by default: in the evaluation it
+did not improve the answers enough to pay for the extra calls and latency
+(see [eval-report.md](eval-report.md#agentic-rag)).
+
 ## Chunking
 
 One chunk per `##` section (sections longer than 220 words would be split on paragraphs;

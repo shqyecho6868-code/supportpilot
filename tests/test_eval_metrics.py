@@ -81,3 +81,18 @@ def test_account_errors_abort_the_run_even_when_wrapped():
         with pytest.raises(EvalAborted):
             raise_if_fatal(wrapped)
     raise_if_fatal(ValueError("a parsing problem"))  # ordinary failures do not abort
+
+
+def test_small_samples_need_more_than_one_case_to_regress():
+    from supportpilot.evals.metrics import threshold_for
+
+    baseline = {"answer.factual_correctness": 0.80, "agent.task_completion_rate": 1.0}
+    current = {"answer.factual_correctness": 0.66, "agent.task_completion_rate": 0.70}
+    rows, failed = compare(
+        baseline, current, {"answer.factual_correctness": 7, "agent.task_completion_rate": 17}
+    )
+    status = {r["metric"]: r["status"] for r in rows}
+    # One answer out of 7 is 14 points: noise. Five tasks out of 17 failing is a regression.
+    assert status == {"answer.factual_correctness": "ok", "agent.task_completion_rate": "REGRESSED"}
+    assert failed
+    assert threshold_for(26) == 1.5 / 26 and threshold_for(100) == 0.05 and threshold_for(None) == 0.05

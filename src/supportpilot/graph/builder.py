@@ -1,19 +1,26 @@
 """LangGraph orchestration.
 
     START -> router -+-> order_agent <-> confirm   (confirm pauses with interrupt())
-                     +-> knowledge_agent            (rewrite query -> search_policy -> cited answer)
+                     +-> knowledge_agent            (rewrite query -> search_policy -> cited answer;
+                     |                               agentic mode: decide -> search -> grade -> rewrite)
                      +-> chitchat                   (smalltalk / out_of_scope: polite reply, no ticket)
                      +-> handoff                    (opens a ticket for a human)
+                     +-> token_limit                (conversation token limit reached: ticket + goodbye)
              all of them end in save_memory -> END
+
+Before routing, the router screens the customer's message with the injection guard and recalls
+long-term memories; both reach the agents as per-turn system context.
 
 The confirm node is the human-in-the-loop gate: it pauses the graph before any
 tool in CONFIRMATION_REQUIRED runs. Because the graph is checkpointed to
 Postgres, a paused turn survives a process restart and resumes from /confirm.
 """
 
+import datetime as dt
 import html
 import json
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -26,15 +33,25 @@ from langgraph.types import interrupt
 from supportpilot.graph.prompts import (
     ACTION_LOG_PREFIX,
     CHITCHAT_PROMPT,
+    CONFIRMATION_EXPIRED_RESULT,
     KNOWLEDGE_AGENT_PROMPT,
+    KNOWLEDGE_FROM_CONVERSATION_PROMPT,
+    LONG_TERM_MEMORY_CONTEXT,
     NO_POLICY_REPLY,
     ORDER_AGENT_PROMPT,
     QUERY_REWRITE_PROMPT,
+    RETRIEVAL_DECISION_PROMPT,
+    RETRIEVAL_GRADE_PROMPT,
     ROUTER_PROMPT,
+    TOKEN_LIMIT_REPLY,
 )
 from supportpilot.graph.state import TurnState
+from supportpilot.guard import USER_NOTICE, neutralize, scan
 from supportpilot.llm import LLMClient
+from supportpilot.llm.usage import current_meter
+from supportpilot.longterm import LongTermMemory, NullLongTermMemory
 from supportpilot.memory import ConversationMemory
+from supportpilot.observability import get_tracer
 from supportpilot.tools import CONFIRMATION_REQUIRED, ORDER_AGENT_TOOLS, ToolGateway
 
 STEP_LIMIT_REPLY = "Sorry, I wasn't able to finish that. I can open a ticket for a human agent if you'd like."
@@ -44,6 +61,31 @@ DECLINED_RESULT = (
 )
 
 
+# Most passages handed to the answer after several agentic retrieval rounds.
+MAX_AGENTIC_PASSAGES = 10
+
+_DECISION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reason": {"type": "string"},
+        "retrieve": {"type": "boolean"},
+        "query": {"type": "string"},
+    },
+    "required": ["reason", "retrieve", "query"],
+    "additionalProperties": False,
+}
+_GRADE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "missing": {"type": "string"},
+        "sufficient": {"type": "boolean"},
+        "next_query": {"type": "string"},
+    },
+    "required": ["missing", "sufficient", "next_query"],
+    "additionalProperties": False,
+}
+
+
 @dataclass
 class GraphDeps:
     llm: LLMClient
@@ -51,6 +93,12 @@ class GraphDeps:
     memory: ConversationMemory
     max_agent_steps: int = 8
     query_rewrite: bool = True
+    agentic_rag: bool = False
+    agentic_max_rewrites: int = 2
+    token_limit: int = 0  # 0 = no limit
+    confirmation_ttl_seconds: int = 900
+    injection_guard: bool = True
+    long_term: LongTermMemory = NullLongTermMemory()
 
 
 def _tool_result(tool_use_id: str, content: str, is_error: bool) -> dict[str, Any]:
@@ -60,6 +108,8 @@ def _tool_result(tool_use_id: str, content: str, is_error: bool) -> dict[str, An
 def _render(entry: dict[str, Any]) -> dict[str, Any]:
     """Turn a memory entry into a message, prefixing the system's record of tool activity."""
     content = entry["content"]
+    if entry["role"] == "user":
+        return {"role": "user", "content": neutralize(content)}
     if entry.get("actions"):
         content = f"{ACTION_LOG_PREFIX} {'; '.join(entry['actions'])}]\n{content}"
     return {"role": entry["role"], "content": content}
@@ -69,7 +119,24 @@ def _conversation(state: TurnState) -> list[dict[str, Any]]:
     history = list(state.get("history") or [])
     while history and history[0]["role"] != "user":  # API requires a user turn first
         history.pop(0)
-    return [*(_render(e) for e in history), {"role": "user", "content": state["user_message"]}]
+    return [*(_render(e) for e in history), {"role": "user", "content": neutralize(state["user_message"])}]
+
+
+def _turn_context(state: TurnState) -> str | None:
+    """Per-turn system context: long-term memories and the injection-guard notice."""
+    parts = []
+    if notes := state.get("long_term"):
+        parts.append(LONG_TERM_MEMORY_CONTEXT.format(notes="\n".join(f"- {n}" for n in notes)))
+    if (verdict := state.get("injection")) and verdict.get("flagged"):
+        parts.append(USER_NOTICE.format(matches=", ".join(verdict["matches"])))
+    return "\n\n".join(parts) or None
+
+
+def _over_budget(state: TurnState, limit: int) -> bool:
+    if not limit:
+        return False
+    meter = current_meter()
+    return state.get("tokens_used", 0) + (meter.total_tokens if meter else 0) >= limit
 
 
 def _describe_args(args: dict[str, Any]) -> str:
@@ -133,11 +200,53 @@ def _emit_text(text: str) -> None:
     get_stream_writer()({"type": "token", "text": text})
 
 
+def pending_turn_record(values: dict[str, Any], prompt: str) -> tuple[str, list[str]]:
+    """What short-term memory stores for a turn paused at the confirmation step."""
+    action = values["pending_action"]
+    actions = _action_log(values.get("messages") or [])
+    actions.append(
+        f"{action['name']}({_describe_args(action['input'])}) is awaiting the customer's confirmation; "
+        "it has NOT been applied"
+    )
+    return prompt, actions
+
+
+def _grade_input(question: str, queries: list[str], hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    passages = "\n".join(f'<source cite="{html.escape(h["source"])}">\n{h["text"]}\n</source>' for h in hits)
+    earlier = "\n".join(f"- {q}" for q in queries)
+    return [
+        {
+            "role": "user",
+            "content": f"<question>\n{question}\n</question>\n\n"
+            f"<queries_so_far>\n{earlier}\n</queries_so_far>\n\n<sources>\n{passages}\n</sources>",
+        }
+    ]
+
+
 def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
+    tracer = get_tracer()
+
     async def router(state: TurnState) -> dict[str, Any]:
-        intent = await deps.llm.classify_intent(ROUTER_PROMPT, _conversation(state))
-        get_stream_writer()({"type": "route", "intent": intent})
-        return {"intent": intent}
+        writer = get_stream_writer()
+        if _over_budget(state, deps.token_limit):
+            writer({"type": "route", "intent": "token_limit"})
+            return {"intent": "token_limit"}
+
+        updates: dict[str, Any] = {}
+        if deps.injection_guard:
+            with tracer.span("guard.user_input", as_type="guardrail", input=state["user_message"]) as obs:
+                verdict = scan(state["user_message"])
+                obs.update(output=verdict.as_dict(), level="WARNING" if verdict.flagged else None)
+            updates["injection"] = verdict.as_dict()
+            if verdict.flagged:
+                writer({"type": "guard", "source": "user_input", "matches": list(verdict.matches)})
+        updates["long_term"] = await deps.long_term.recall(state["user_id"], state["user_message"])
+
+        with tracer.span("router", as_type="chain", input=state["user_message"]) as obs:
+            intent = await deps.llm.classify_intent(ROUTER_PROMPT, _conversation(state))
+            obs.update(output={"intent": intent})
+        writer({"type": "route", "intent": intent})
+        return {**updates, "intent": intent}
 
     async def order_agent(state: TurnState) -> dict[str, Any]:
         messages = state.get("messages") or _conversation(state)
@@ -145,9 +254,16 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
         if steps >= deps.max_agent_steps:
             _emit_text(STEP_LIMIT_REPLY)
             return {"reply": STEP_LIMIT_REPLY}
+        if steps and _over_budget(state, deps.token_limit):
+            return {"over_budget": True, "messages": messages}
 
         turn = await deps.llm.respond(
-            ORDER_AGENT_PROMPT, messages, await deps.tools.model_tools(ORDER_AGENT_TOOLS), _emit_text
+            ORDER_AGENT_PROMPT,
+            messages,
+            await deps.tools.model_tools(ORDER_AGENT_TOOLS),
+            _emit_text,
+            system_suffix=_turn_context(state),
+            name="order_agent",
         )
         messages = [*messages, {"role": "assistant", "content": turn.content}]
         if not turn.tool_uses:
@@ -165,6 +281,8 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
                         "input": call["input"],
                         # Fixed before the pause, so every retry of this action reuses the same key.
                         "idempotency_key": f"{state['session_id']}:{uuid.uuid4().hex}",
+                        # Fixed here too (this node does not re-run on resume; confirm does).
+                        "expires_at": time.time() + deps.confirmation_ttl_seconds,
                     }
                 else:
                     results.append(
@@ -209,10 +327,16 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
         if precheck_error is not None:
             outcome = _tool_result(action["tool_use_id"], precheck_error, True)
         else:
+            expires_at = action.get("expires_at")
             decision = interrupt(
                 {
                     "type": "confirmation_required",
                     "tool": action["name"],
+                    "expires_at": (
+                        dt.datetime.fromtimestamp(expires_at, dt.UTC).isoformat(timespec="seconds")
+                        if expires_at
+                        else None
+                    ),
                     "order_id": args["order_id"],
                     "current_address": json.loads(current.content)["shipping_address"],
                     "new_address": {
@@ -221,11 +345,15 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
                     "message": f"Please confirm the new shipping address for order {args['order_id']}.",
                 }
             )
+            if decision == "approve" and expires_at and time.time() > expires_at:
+                decision = "expired"  # the API checks this too; this is the authoritative check
             if decision == "approve":
                 result = await deps.tools.call(
                     action["name"], args, user_id=user_id, idempotency_key=action["idempotency_key"]
                 )
                 outcome = _tool_result(action["tool_use_id"], result.content, result.is_error)
+            elif decision == "expired":
+                outcome = _tool_result(action["tool_use_id"], CONFIRMATION_EXPIRED_RESULT, True)
             else:
                 outcome = _tool_result(action["tool_use_id"], DECLINED_RESULT, True)
             writer({"type": "action_result", "decision": decision, "is_error": outcome["is_error"]})
@@ -238,26 +366,100 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
             "pending_action": None,
         }
 
+    async def search(query: str, user_id: str) -> list[dict[str, Any]]:
+        with tracer.span("retrieval", as_type="retriever", input=query) as obs:
+            result = await deps.tools.call("search_policy", {"query": query}, user_id=user_id)
+            hits = [] if result.is_error else json.loads(result.content)["results"]
+            obs.update(output=[{"source": h["source"], "score": h["score"]} for h in hits])
+        return hits
+
+    async def agentic_retrieve(
+        state: TurnState, conversation: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Decide whether to search; search, grade, and rewrite the query while passages are missing."""
+        with tracer.span("agentic_rag", as_type="chain", input=state["user_message"]) as obs:
+            decision = await deps.llm.structured(
+                "retrieval_decision",
+                RETRIEVAL_DECISION_PROMPT,
+                _rewrite_input(conversation),
+                _DECISION_SCHEMA,
+            )
+            # A first message routed here is a policy question: only follow-ups may skip the search.
+            if decision and not decision["retrieve"] and len(conversation) > 1:
+                retrieval = {"query": None, "queries": [], "results": [], "skipped": True, "rounds": []}
+                obs.update(output={"skipped": True, "reason": decision["reason"]})
+                return [], retrieval
+
+            query = (decision or {}).get("query", "").strip() or state["user_message"]
+            question = query if len(conversation) > 1 else state["user_message"]
+            merged: dict[str, dict[str, Any]] = {}
+            queries: list[str] = []
+            rounds: list[dict[str, Any]] = []
+            for round_no in range(1 + deps.agentic_max_rewrites):
+                queries.append(query)
+                found = await search(query, state["user_id"])
+                for hit in found:
+                    merged.setdefault(hit["chunk_id"], hit)
+                rounds.append({"query": query, "found": [h["source"] for h in found]})
+                if round_no == deps.agentic_max_rewrites:
+                    break  # no rewrites left: grading would not change anything
+                grade = await deps.llm.structured(
+                    "retrieval_grade",
+                    RETRIEVAL_GRADE_PROMPT,
+                    _grade_input(question, queries, list(merged.values())),
+                    _GRADE_SCHEMA,
+                )
+                rounds[-1]["grade"] = grade
+                if grade is None or grade["sufficient"]:
+                    break
+                next_query = grade["next_query"].strip()
+                if not next_query or next_query in queries:
+                    break
+                query = next_query
+            hits = list(merged.values())[:MAX_AGENTIC_PASSAGES]
+            obs.update(output={"queries": queries, "rounds": rounds, "passages": [h["source"] for h in hits]})
+        return hits, {"query": queries[0], "queries": queries, "results": hits, "rounds": rounds}
+
     async def knowledge_agent(state: TurnState) -> dict[str, Any]:
         conversation = _conversation(state)
-        query = state["user_message"]
-        # Only follow-ups need rewriting; a first message is already standalone.
-        if deps.query_rewrite and len(conversation) > 1:
-            query = await deps.llm.rewrite_query(QUERY_REWRITE_PROMPT, _rewrite_input(conversation)) or query
+        context = _turn_context(state)
+        if deps.agentic_rag:
+            hits, retrieval = await agentic_retrieve(state, conversation)
+            if retrieval.get("skipped"):
+                get_stream_writer()({"type": "sources", "query": None, "sources": []})
+                turn = await deps.llm.respond(
+                    KNOWLEDGE_FROM_CONVERSATION_PROMPT,
+                    conversation,
+                    [],
+                    _emit_text,
+                    system_suffix=context,
+                    name="knowledge_agent",
+                )
+                return {"reply": turn.text, "retrieval": retrieval}
+        else:
+            query = state["user_message"]
+            # Only follow-ups need rewriting; a first message is already standalone.
+            if deps.query_rewrite and len(conversation) > 1:
+                query = (
+                    await deps.llm.rewrite_query(QUERY_REWRITE_PROMPT, _rewrite_input(conversation)) or query
+                )
+            hits = await search(query, state["user_id"])
+            retrieval = {"query": query, "queries": [query], "results": hits}
 
-        result = await deps.tools.call("search_policy", {"query": query}, user_id=state["user_id"])
-        hits = [] if result.is_error else json.loads(result.content)["results"]
-        get_stream_writer()({"type": "sources", "query": query, "sources": [h["source"] for h in hits]})
-        retrieval = {"query": query, "results": hits}
+        get_stream_writer()(
+            {"type": "sources", "query": retrieval["query"], "sources": [h["source"] for h in hits]}
+        )
         if not hits:
             _emit_text(NO_POLICY_REPLY)
             return {"reply": NO_POLICY_REPLY, "retrieval": retrieval}
 
         messages = [
             *conversation[:-1],
-            {"role": "user", "content": _sources_message(hits, state["user_message"])},
+            {"role": "user", "content": _sources_message(hits, neutralize(state["user_message"]))},
         ]
-        turn = await deps.llm.respond(KNOWLEDGE_AGENT_PROMPT, messages, [], _emit_text)
+        turn = await deps.llm.respond(
+            KNOWLEDGE_AGENT_PROMPT, messages, [], _emit_text, system_suffix=context, name="knowledge_agent"
+        )
         reply = turn.text
         if turn.stop_reason != "refusal" and not cited_sources(reply, hits):
             # Every policy answer carries its sources, even if the model forgot to cite.
@@ -267,8 +469,34 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
         return {"reply": reply, "retrieval": retrieval}
 
     async def chitchat(state: TurnState) -> dict[str, Any]:
-        turn = await deps.llm.respond(CHITCHAT_PROMPT, _conversation(state), [], _emit_text)
+        turn = await deps.llm.respond(
+            CHITCHAT_PROMPT,
+            _conversation(state),
+            [],
+            _emit_text,
+            system_suffix=_turn_context(state),
+            name="chitchat",
+        )
         return {"reply": turn.text}
+
+    async def token_limit(state: TurnState) -> dict[str, Any]:
+        """The conversation reached its token budget: hand it to a human and end politely."""
+        transcript = "\n".join(f"{m['role']}: {m['content']}" for m in _conversation(state))
+        result = await deps.tools.call(
+            "create_ticket",
+            {
+                "subject": "Conversation handed off: token limit reached",
+                "description": (
+                    f"SupportPilot reached the conversation token limit.\n\nConversation:\n{transcript}"
+                ),
+                "priority": "normal",
+            },
+            user_id=state["user_id"],
+        )
+        ticket = "" if result.is_error else f" (ticket {json.loads(result.content)['ticket_id']})"
+        reply = TOKEN_LIMIT_REPLY.format(ticket=ticket)
+        _emit_text(reply)
+        return {"reply": reply, "over_budget": True}
 
     async def handoff(state: TurnState) -> dict[str, Any]:
         transcript = "\n".join(f"{m['role']}: {m['content']}" for m in _conversation(state))
@@ -298,18 +526,26 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
             state["user_message"],
             state.get("reply") or "",
             actions=_action_log(state.get("messages") or []),
+            turn_id=state.get("turn_id"),
         )
         return {}
 
-    def route_intent(state: TurnState) -> Literal["order_agent", "knowledge_agent", "chitchat", "handoff"]:
+    def route_intent(
+        state: TurnState,
+    ) -> Literal["order_agent", "knowledge_agent", "chitchat", "handoff", "token_limit"]:
         return {
+            "token_limit": "token_limit",
             "knowledge": "knowledge_agent",
             "handoff": "handoff",
             "smalltalk": "chitchat",
             "out_of_scope": "chitchat",
         }.get(state["intent"], "order_agent")
 
-    def after_order_agent(state: TurnState) -> Literal["confirm", "order_agent", "save_memory"]:
+    def after_order_agent(
+        state: TurnState,
+    ) -> Literal["confirm", "order_agent", "save_memory", "token_limit"]:
+        if state.get("over_budget"):
+            return "token_limit"
         if state.get("pending_action"):
             return "confirm"
         if state.get("reply") is not None:
@@ -323,6 +559,7 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
     graph.add_node("knowledge_agent", knowledge_agent)
     graph.add_node("chitchat", chitchat)
     graph.add_node("handoff", handoff)
+    graph.add_node("token_limit", token_limit)
     graph.add_node("save_memory", save_memory)
 
     graph.add_edge(START, "router")
@@ -332,5 +569,6 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
     graph.add_edge("knowledge_agent", "save_memory")
     graph.add_edge("chitchat", "save_memory")
     graph.add_edge("handoff", "save_memory")
+    graph.add_edge("token_limit", "save_memory")
     graph.add_edge("save_memory", END)
     return graph.compile(checkpointer=checkpointer)

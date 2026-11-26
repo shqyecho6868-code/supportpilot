@@ -20,8 +20,45 @@ class Settings(BaseSettings):
     # Upper bound on model <-> tool round trips within a single user turn.
     max_agent_steps: int = 8
 
-    # Small, fast model for query rewriting and contextual-retrieval chunk context.
+    # Small, fast model for query rewriting, agentic-RAG decisions, long-term memory extraction
+    # and contextual-retrieval chunk context.
     fast_model: str = "claude-haiku-5-5"
+
+    # Reliability. Transient failures are retried with exponential backoff; if the main model
+    # still fails (or does not exist) the call is repeated on fallback_model.
+    fallback_model: str = "claude-haiku-5-5"
+    llm_timeout_seconds: float = 60.0
+    llm_max_retries: int = 3
+    llm_retry_base_delay: float = 0.5
+    llm_retry_max_delay: float = 8.0
+    # Upper bound on tokens (input + output, including cached input) per conversation. Past it the
+    # assistant ends politely and hands the conversation to a human. 0 disables the limit.
+    conversation_token_limit: int = 200_000
+
+    # Human-in-the-loop: a pending confirmation expires after this many seconds.
+    confirmation_ttl_seconds: int = 900
+
+    # Agentic RAG: decide whether to retrieve, grade the passages, rewrite and search again
+    # (at most agentic_rag_max_rewrites extra rounds). Off by default: see docs/eval-report.md.
+    agentic_rag: bool = False
+    agentic_rag_max_rewrites: int = 2
+
+    # Long-term memory (mem0, stored in pgvector): customer preferences and past issues across
+    # sessions. Uses fast_model to extract memories after each turn.
+    long_term_memory: bool = True
+    long_term_memory_top_k: int = 5
+    mem0_collection: str = "mem0_memories"
+    mem0_history_db: str = ".mem0/history.db"
+
+    # Prompt-injection guard on customer messages and tool results.
+    injection_guard: bool = True
+
+    # Langfuse tracing: on when both keys are set.
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
+    langfuse_base_url: str | None = None
+    langfuse_enabled: bool = True
+    app_environment: str = "development"
 
     # Knowledge-base retrieval. Every stage can be switched off independently.
     retrieval_vector: bool = True
@@ -35,7 +72,7 @@ class Settings(BaseSettings):
     retrieval_candidates: int = 20  # per-retriever candidates before fusion / reranking
     retrieval_rrf_k: int = 60
     embedding_model: str = "BAAI/bge-small-en-v1.5"
-    reranker_model: str = "BAAI/bge-reranker-base"
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"
 
 
 @lru_cache

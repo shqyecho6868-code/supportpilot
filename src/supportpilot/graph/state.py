@@ -14,3 +14,8 @@ class TurnState(TypedDict, total=False):
     steps: int
     reply: str | None
     retrieval: dict[str, Any] | None  # knowledge agent: the search query and passages it used
+    turn_id: str  # the LangGraph thread id; keys this turn's entry in short-term memory
+    tokens_used: int  # tokens the conversation had used before this turn
+    over_budget: bool  # the conversation token limit was reached during this turn
+    injection: dict[str, Any] | None  # injection-guard verdict on the customer's message
+    long_term: list[str]  # recalled long-term memories about this customer

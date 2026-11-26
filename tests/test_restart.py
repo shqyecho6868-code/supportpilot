@@ -42,6 +42,8 @@ class Server:
             "DATABASE_URL": TEST_DATABASE_URL,
             "REDIS_URL": TEST_REDIS_URL,
             "LLM_PROVIDER": self.llm_provider,
+            "LANGFUSE_ENABLED": "false",
+            "LONG_TERM_MEMORY": "false",
         }
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "uvicorn", "supportpilot.api.app:create_app", "--factory",

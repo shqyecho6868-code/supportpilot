@@ -33,6 +33,37 @@ services:
       timeout: 3s
       retries: 30
 
+  api:
+    build: .
+    container_name: supportpilot-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Service hostnames inside the compose network override the localhost URLs in .env.
+      DATABASE_URL: postgresql://supportpilot:supportpilot@postgres:5432/supportpilot
+      REDIS_URL: redis://redis:6379/0
+      MEM0_HISTORY_DB: /data/mem0_history.db
+      APP_ENVIRONMENT: ${APP_ENVIRONMENT:-docker}
+    ports:
+      - "8000:8000"
+    volumes:
+      - models:/models   # fastembed models (embedding, reranker), downloaded on first start
+      - appdata:/data    # mem0 history
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
 volumes:
   pgdata:
   redisdata:
+  models:
+  appdata:

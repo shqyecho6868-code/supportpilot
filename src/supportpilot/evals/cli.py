@@ -6,6 +6,11 @@
     uv run supportpilot-eval compare           # full eval, compare with the baseline; on a regression
                                                # of more than 5 points re-run once, exit 1 only if
                                                # the same metric regresses in both runs
+    uv run supportpilot-eval retrieval-sweep   # rerankers x top_k, retrieval metrics only (no grader)
+    uv run supportpilot-eval promote evals/results/latest.json   # write a baseline from a saved run
+
+    --subset ci --baseline evals/baseline-ci.json   # the ~15-case PR gate used in CI
+    --agentic on|off                                # override AGENTIC_RAG for this run
 
 Needs the compose stack and ANTHROPIC_API_KEY. The model under test and, for routine runs, the
 judge and Ragas default to Claude Haiku. The one-off deep evaluation is graded by Sonnet:
@@ -22,13 +27,16 @@ import datetime as dt
 import json
 import logging
 import sys
+import time
+import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 from supportpilot.config import Settings, get_settings
 from supportpilot.db import create_pool
-from supportpilot.evals.cases import BASELINE_FILE, RESULTS_DIR, Case, load_cases
+from supportpilot.evals.cases import BASELINE_FILE, RESULTS_DIR, Case, load_cases, load_subset
 from supportpilot.evals.judges import EvalAborted, RagasScorer, TaskJudge
 from supportpilot.evals.metrics import (
     compare,
@@ -41,6 +49,8 @@ from supportpilot.evals.metrics import (
 from supportpilot.evals.runner import AgentRunner, answer_with, dumps, prepare_database, rewrite_for_retrieval
 from supportpilot.kb import RetrievalConfig, Retriever
 from supportpilot.llm.anthropic_llm import AnthropicLLM
+from supportpilot.llm.usage import PROCESS_METER
+from supportpilot.observability import configure_tracing
 
 log = logging.getLogger("supportpilot.evals")
 
@@ -109,6 +119,22 @@ async def retrieval_eval(
     return metrics, per_case
 
 
+def _llm(args, settings: Settings) -> AnthropicLLM:
+    return AnthropicLLM(
+        args.model,
+        settings.anthropic_api_key,
+        fast_model=settings.fast_model,
+        fallback_model=settings.fallback_model,
+        timeout=settings.llm_timeout_seconds,
+        max_retries=settings.llm_max_retries,
+    )
+
+
+def _agentic(args, settings: Settings) -> bool:
+    choice = getattr(args, "agentic", None)
+    return settings.agentic_rag if choice in (None, "config") else choice == "on"
+
+
 def _question(case: Case, query: str) -> str:
     """The question Ragas sees: a follow-up needs its rewritten, standalone form."""
     return query if case.history else case.message
@@ -117,7 +143,7 @@ def _question(case: Case, query: str) -> str:
 async def cmd_ablation(args, settings: Settings) -> int:
     cases = [c for c in load_cases() if c.is_knowledge]
     url = await prepare_database(settings.database_url, settings.fast_model, settings.embedding_model)
-    llm = AnthropicLLM(args.model, settings.anthropic_api_key, fast_model=settings.fast_model)
+    llm = _llm(args, settings)
     scorer = RagasScorer(args.judge_model, settings.embedding_model, settings.anthropic_api_key)
     pool = create_pool(url, max_size=8)
     await pool.open(wait=True)
@@ -179,12 +205,11 @@ async def cmd_ablation(args, settings: Settings) -> int:
 
 
 async def full_eval(args, settings: Settings) -> dict[str, Any]:
-    cases = load_cases()
-    if args.only:
-        cases = [c for c in cases if c.id in set(args.only.split(","))]
+    cases = _select_cases(args)
     url = await prepare_database(settings.database_url, settings.fast_model, settings.embedding_model)
-    llm = AnthropicLLM(args.model, settings.anthropic_api_key, fast_model=settings.fast_model)
+    llm = _llm(args, settings)
     cfg = RetrievalConfig.from_settings(settings)
+    agentic = _agentic(args, settings)
 
     # 1. Retrieval metrics on the labelled knowledge cases (independent of routing).
     knowledge = [c for c in cases if c.is_knowledge]
@@ -197,7 +222,17 @@ async def full_eval(args, settings: Settings) -> dict[str, Any]:
         await pool.close()
 
     # 2. Every case through the real graph (sequential: each case resets the order tables).
-    runner = AgentRunner(url, _redis_url(settings), llm, cfg, query_rewrite=settings.retrieval_query_rewrite)
+    runner = AgentRunner(
+        url,
+        _redis_url(settings),
+        llm,
+        cfg,
+        query_rewrite=settings.retrieval_query_rewrite,
+        agentic_rag=agentic,
+        injection_guard=settings.injection_guard,
+        trace_tags=tuple(args.trace_tags),
+        run_id=args.run_id,
+    )
     records = []
     for case in cases:
         record = await runner.run_case(case)
@@ -249,7 +284,22 @@ async def full_eval(args, settings: Settings) -> dict[str, Any]:
         record["ragas"] = scores
 
     security = [r for r in records if by_id[r["id"]].is_security]
-    no_ticket_expected = [r for r in records if not by_id[r["id"]].expect_ticket]
+    no_ticket_expected = [r for r in records if by_id[r["id"]].expect_ticket is False]
+    injection = [r for r in records if by_id[r["id"]].category == "prompt_injection"]
+    benign = [r for r in records if by_id[r["id"]].category not in ("prompt_injection",)]
+
+    def flagged(r: dict[str, Any]) -> bool:
+        flags = r.get("injection_flags") or {}
+        return bool(flags.get("user_input") or flags.get("tool_results"))
+
+    # The passages the agent actually answered from (all rounds in agentic mode), vs. the labels.
+    agent_retrieval = []
+    for r in answered:
+        hits = (r.get("retrieval") or {}).get("results") or []
+        if not (r.get("retrieval") or {}).get("skipped"):
+            agent_retrieval.append(
+                retrieval_scores(by_id[r["id"]], [h["chunk_id"] for h in hits], k=len(hits) or 1)
+            )
     metrics = {
         **{k: v for k, v in retrieval_metrics.items()},
         "answer.faithfulness": mean([r["ragas"]["faithfulness"] for r in answered if r.get("ragas")]),
@@ -265,6 +315,36 @@ async def full_eval(args, settings: Settings) -> dict[str, Any]:
         "agent.false_ticket_rate": mean(
             [1.0 if r["tickets_created"] > 0 else 0.0 for r in no_ticket_expected]
         ),
+        "guard.injection_detection_rate": mean([1.0 if flagged(r) else 0.0 for r in injection]),
+        "guard.false_positive_rate": mean([1.0 if flagged(r) else 0.0 for r in benign]),
+    }
+    with_ragas = [r for r in answered if r.get("ragas")]
+    counts = {
+        **{k: len(knowledge) for k in retrieval_metrics},
+        "answer.faithfulness": len(with_ragas),
+        "answer.factual_correctness": len(with_ragas),
+        "answer.answer_relevancy": len(with_ragas),
+        "answer.citation_rate": len(answered),
+        "agent.routing_accuracy": len(records),
+        "agent.tool_call_accuracy": len(records),
+        "agent.task_completion_rate": len(records),
+        "agent.unauthorized_block_rate": len(security),
+        "agent.false_ticket_rate": len(no_ticket_expected),
+        "guard.injection_detection_rate": len(injection),
+        "guard.false_positive_rate": len(benign),
+    }
+    # Informational (not in the baseline): retrieval measured on what the agent answered from.
+    info = {
+        "retrieval_agent.hit_rate": mean([x["hit"] for x in agent_retrieval]),
+        "retrieval_agent.recall": mean([x["recall"] for x in agent_retrieval]),
+        "retrieval_agent.passages_per_answer": mean(
+            [float(len((r.get("retrieval") or {}).get("results") or [])) for r in answered]
+        ),
+        "retrieval_agent.searches_per_answer": mean(
+            [float(len((r.get("retrieval") or {}).get("queries") or [])) for r in answered]
+        ),
+        "agent.seconds_per_case": mean([r.get("seconds") for r in records]),
+        "agent.cost_usd_per_case": mean([(r.get("usage") or {}).get("cost_usd") for r in records]),
     }
     return {
         "date": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
@@ -279,7 +359,14 @@ async def full_eval(args, settings: Settings) -> dict[str, Any]:
             "chunk_context": settings.fast_model,
         },
         "retrieval_config": asdict(cfg),
+        "agentic_rag": agentic,
+        "subset": args.subset,
+        "case_ids": [c.id for c in cases],
+        "run_id": args.run_id,
         "metrics": metrics,
+        "metric_counts": counts,
+        "info": info,
+        "usage": PROCESS_METER.summary(),
         "records": records,
         "retrieval_details": retrieval_details,
     }
@@ -296,7 +383,8 @@ def _hard_checks(case: Case, record: dict[str, Any]) -> dict[str, bool]:
         checks["protected_unchanged"] = all(
             record["orders_before"].get(o) == record["orders_after"].get(o) for o in case.protected_orders
         )
-    checks["ticket_as_expected"] = (record["tickets_created"] > 0) == case.expect_ticket
+    if case.expect_ticket is not None:
+        checks["ticket_as_expected"] = (record["tickets_created"] > 0) == case.expect_ticket
     if case.expect_confirmation:
         checks["confirmation_requested"] = record["confirmation"] is not None
     if case.expect_address:
@@ -311,6 +399,26 @@ def _summary_table(metrics: dict[str, float | None]) -> str:
     return "\n".join(f"  {k:32s} {_pct(v)}" for k, v in metrics.items())
 
 
+def _select_cases(args) -> list[Case]:
+    cases = load_cases()
+    wanted: set[str] | None = None
+    if getattr(args, "subset", None):
+        wanted = set(load_subset(args.subset))
+    if getattr(args, "only", None):
+        wanted = (wanted or set(c.id for c in cases)) & set(args.only.split(","))
+    if wanted is not None:
+        missing = wanted - {c.id for c in cases}
+        if missing:
+            raise SystemExit(f"unknown case ids: {sorted(missing)}")
+        cases = [c for c in cases if c.id in wanted]
+    return cases
+
+
+def _print_info(result: dict[str, Any]) -> None:
+    for k, v in result["info"].items():
+        print(f"  {k:32s} {v if v is None else round(v, 4)}")
+
+
 def _save_run(result: dict[str, Any], name: str) -> None:
     RESULTS_DIR.mkdir(exist_ok=True)
     path = RESULTS_DIR / f"{name}.json"
@@ -318,10 +426,29 @@ def _save_run(result: dict[str, Any], name: str) -> None:
     print(f"details: {path}")
 
 
+BASELINE_KEYS = (
+    "date",
+    "n_cases",
+    "models",
+    "retrieval_config",
+    "agentic_rag",
+    "subset",
+    "case_ids",
+    "metrics",
+)
+
+
+def _write_baseline(result: dict[str, Any], path: Path) -> None:
+    baseline = {k: result.get(k) for k in BASELINE_KEYS}
+    path.write_text(json.dumps(baseline, indent=2) + "\n")
+    print(f"wrote {path}")
+
+
 async def cmd_run(args, settings: Settings) -> int:
     result = await full_eval(args, settings)
     print("\n" + _summary_table(result["metrics"]))
-    _save_run(result, "latest")
+    _print_info(result)
+    _save_run(result, args.results_name or "latest")
     return 0
 
 
@@ -329,18 +456,30 @@ async def cmd_baseline(args, settings: Settings) -> int:
     result = await full_eval(args, settings)
     print("\n" + _summary_table(result["metrics"]))
     _save_run(result, "baseline-run")
-    baseline = {k: result[k] for k in ("date", "n_cases", "models", "retrieval_config", "metrics")}
-    BASELINE_FILE.write_text(json.dumps(baseline, indent=2) + "\n")
-    print(f"wrote {BASELINE_FILE}")
+    _write_baseline(result, Path(args.baseline))
+    return 0
+
+
+def _read_json(path: str) -> dict[str, Any] | None:
+    p = Path(path)
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+async def cmd_promote(args, settings: Settings) -> int:
+    """Write a baseline from a saved full-eval run (no model calls)."""
+    result = _read_json(args.results)
+    _write_baseline(result, Path(args.baseline))
     return 0
 
 
 def _print_comparison(rows: list[dict[str, Any]]) -> None:
-    print(f"\n{'metric':32s} {'baseline':>9s} {'current':>9s} {'delta':>8s}  status")
+    print(f"\n{'metric':32s} {'baseline':>9s} {'current':>9s} {'delta':>8s} {'limit':>7s}  status")
     for r in rows:
         delta = "n/a" if r["delta"] is None else f"{r['delta'] * 100:+.1f}pp"
+        limit = f"{r['threshold'] * 100:.1f}pp" if r.get("threshold") else ""
         print(
-            f"{r['metric']:32s} {_pct(r['baseline']):>9s} {_pct(r['current']):>9s} {delta:>8s}  {r['status']}"
+            f"{r['metric']:32s} {_pct(r['baseline']):>9s} {_pct(r['current']):>9s} {delta:>8s} {limit:>7s}"
+            f"  {r['status']}"
         )
 
 
@@ -350,10 +489,15 @@ async def cmd_compare(args, settings: Settings) -> int:
     LLM-graded metrics move a few points between identical runs, so a first-run regression
     triggers one automatic re-run; only metrics that regress in both runs fail the check.
     """
-    if not BASELINE_FILE.exists():
-        print("no baseline: run `supportpilot-eval baseline` first", file=sys.stderr)
+    baseline = _read_json(args.baseline)
+    if baseline is None:
+        print(f"no baseline at {args.baseline}: run `supportpilot-eval baseline` first", file=sys.stderr)
         return 2
-    baseline = json.loads(BASELINE_FILE.read_text())
+    if baseline.get("case_ids") and sorted(baseline["case_ids"]) != sorted(c.id for c in _select_cases(args)):
+        print(
+            "the baseline was produced on a different set of cases; pass the same --subset", file=sys.stderr
+        )
+        return 2
     if baseline["models"]["agent"] != args.model or baseline["models"]["judge"] != args.judge_model:
         # Scores from different graders are not comparable (Sonnet grades ~3 points stricter).
         print(
@@ -364,8 +508,8 @@ async def cmd_compare(args, settings: Settings) -> int:
         return 2
 
     result = await full_eval(args, settings)
-    _save_run(result, "latest")
-    first, failed = compare(baseline["metrics"], result["metrics"])
+    _save_run(result, args.results_name or "latest")
+    first, failed = compare(baseline["metrics"], result["metrics"], result["metric_counts"])
     _print_comparison(first)
     if not failed:
         print("\nOK: no regressions")
@@ -373,39 +517,162 @@ async def cmd_compare(args, settings: Settings) -> int:
 
     print(f"\nRegressed in run 1: {sorted(regressed_metrics(first))}. Re-running once to rule out noise.")
     result = await full_eval(args, settings)
-    _save_run(result, "latest-rerun")
-    second, _ = compare(baseline["metrics"], result["metrics"])
+    _save_run(result, f"{args.results_name or 'latest'}-rerun")
+    second, _ = compare(baseline["metrics"], result["metrics"], result["metric_counts"])
     _print_comparison(second)
     persistent = persistent_regressions(first, second)
     if persistent:
-        print(f"\nFAIL: regressed by more than 5 percentage points in both runs: {sorted(persistent)}")
+        print(f"\nFAIL: regressed beyond the limit in both runs: {sorted(persistent)}")
         return 1
     print("\nOK: the first-run regressions did not reproduce")
+    return 0
+
+
+# Chunks the reference answers of the three cases that failed the P2 baseline need (beyond the
+# labelled sources, which only mark the primary section). Used to see whether a retrieval change
+# would put the missing facts in front of the answer.
+NEEDED_CHUNKS = {
+    "pol-01": ["returns#return-window", "returns#electronics"],
+    "pol-02": ["returns#electronics", "returns#return-shipping-costs"],
+    "multi-04": ["warranty#electronics-coverage", "membership#warranty-and-rewards-benefits"],
+}
+
+SWEEP_RERANKERS = {"none": None, "base": "BAAI/bge-reranker-base", "v2-m3": "BAAI/bge-reranker-v2-m3"}
+
+
+async def cmd_retrieval_sweep(args, settings: Settings) -> int:
+    """Rerankers x top_k on the labelled cases. Only retrieval metrics: no answers, no grader."""
+    cases = [c for c in load_cases() if c.is_knowledge]
+    url = await prepare_database(settings.database_url, settings.fast_model, settings.embedding_model)
+    llm = _llm(args, settings)
+    queries = {c.id: await rewrite_for_retrieval(llm, c) for c in cases}  # 3 multi-turn cases call Haiku
+    pool = create_pool(url, max_size=4)
+    await pool.open(wait=True)
+    retriever = Retriever(pool)
+    base = RetrievalConfig.from_settings(settings)
+    rows = []
+    try:
+        for reranker_key in args.rerankers.split(","):
+            model = SWEEP_RERANKERS[reranker_key]
+            for top_k in [int(k) for k in args.top_k.split(",")]:
+                cfg = base.with_(
+                    rerank=model is not None, reranker_model=model or base.reranker_model, top_k=top_k
+                )
+                await retriever.search("warm up the models", cfg)
+                ranked: dict[str, list[str]] = {}
+                started = time.monotonic()
+                for case in cases:
+                    ranked[case.id] = [h.chunk_id for h in await retriever.search(queries[case.id], cfg)]
+                seconds = (time.monotonic() - started) / len(cases)
+                at_k = [retrieval_scores(c, ranked[c.id], k=top_k) for c in cases]
+                at_5 = [retrieval_scores(c, ranked[c.id], k=5) for c in cases]
+                needed = {
+                    cid: {
+                        chunk: (ranked[cid].index(chunk) + 1 if chunk in ranked[cid] else None)
+                        for chunk in chunks
+                    }
+                    for cid, chunks in NEEDED_CHUNKS.items()
+                }
+                row = {
+                    "reranker": reranker_key,
+                    "top_k": top_k,
+                    f"hit@{top_k}": mean([x["hit"] for x in at_k]),
+                    f"mrr@{top_k}": mean([x["rr"] for x in at_k]),
+                    f"recall@{top_k}": mean([x["recall"] for x in at_k]),
+                    "mrr@5": mean([x["rr"] for x in at_5]),
+                    "recall@5": mean([x["recall"] for x in at_5]),
+                    "seconds_per_query": round(seconds, 3),
+                    "needed_chunk_ranks": needed,
+                    "all_needed_present": {
+                        cid: all(v is not None for v in r.values()) for cid, r in needed.items()
+                    },
+                }
+                rows.append(row)
+                print(
+                    f"rerank={reranker_key:6s} top_k={top_k:2d}  hit={_pct(row[f'hit@{top_k}'])} "
+                    f"mrr@k={_pct(row[f'mrr@{top_k}'])} recall@k={_pct(row[f'recall@{top_k}'])} "
+                    f"mrr@5={_pct(row['mrr@5'])} recall@5={_pct(row['recall@5'])} "
+                    f"{seconds:.2f}s/query  needed={row['all_needed_present']}",
+                    flush=True,
+                )
+    finally:
+        await pool.close()
+    RESULTS_DIR.mkdir(exist_ok=True)
+    out = {"date": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"), "queries": queries, "rows": rows}
+    (RESULTS_DIR / "retrieval-sweep.json").write_text(dumps(out) + "\n")
+    print(f"\nwrote {RESULTS_DIR / 'retrieval-sweep.json'}")
     return 0
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="supportpilot-eval", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("ablation", "run", "baseline", "compare"):
+    for name in ("ablation", "run", "baseline", "compare", "retrieval-sweep"):
         p = sub.add_parser(name)
         p.add_argument("--model", default=DEFAULT_MODEL, help="model under test (agent / answers)")
         p.add_argument("--judge-model", default=DEFAULT_JUDGE_MODEL, help="model for the judge and Ragas")
         p.add_argument("--concurrency", type=int, default=6)
+        p.add_argument("--tag", action="append", default=[], help="extra Langfuse trace tag (repeatable)")
         if name == "ablation":
             p.add_argument("--retrieval-only", action="store_true", help="skip answer generation and Ragas")
+        elif name == "retrieval-sweep":
+            p.add_argument(
+                "--rerankers", default="none,base,v2-m3", help=f"subset of {sorted(SWEEP_RERANKERS)}"
+            )
+            p.add_argument("--top-k", default="5,8", help="comma-separated top_k values")
         else:
             p.add_argument("--only", help="comma-separated case ids (debugging)")
+            p.add_argument("--subset", help="evals/subsets/<name>.txt, e.g. ci")
+            p.add_argument("--agentic", choices=["on", "off", "config"], default="config")
+            p.add_argument("--baseline", default=str(BASELINE_FILE), help="baseline file to write / compare")
+            p.add_argument("--results-name", help="name of the results file under evals/results/")
+    p = sub.add_parser("promote", help="write a baseline from a saved run")
+    p.add_argument("results")
+    p.add_argument("--baseline", default=str(BASELINE_FILE))
     args = parser.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 
     settings = get_settings()
+    handler = {
+        "ablation": cmd_ablation,
+        "run": cmd_run,
+        "baseline": cmd_baseline,
+        "compare": cmd_compare,
+        "retrieval-sweep": cmd_retrieval_sweep,
+        "promote": cmd_promote,
+    }
+    if args.command == "promote":
+        sys.exit(asyncio.run(cmd_promote(args, settings)))
     if not settings.anthropic_api_key:
         print("ANTHROPIC_API_KEY is required for evaluation", file=sys.stderr)
         sys.exit(2)
-    handler = {"ablation": cmd_ablation, "run": cmd_run, "baseline": cmd_baseline, "compare": cmd_compare}
+
+    args.run_id = f"eval-{args.command}-{dt.datetime.now(dt.UTC):%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:4]}"
+    args.trace_tags = [f"eval:{args.command}", f"run:{args.run_id}", f"agent:{args.model}", *args.tag]
+    if getattr(args, "subset", None):
+        args.trace_tags.append(f"subset:{args.subset}")
+    if _agentic(args, settings):
+        args.trace_tags.append("agentic_rag")
+    args.subset = getattr(args, "subset", None)
+    tracer = configure_tracing(
+        public_key=settings.langfuse_public_key,
+        secret_key=settings.langfuse_secret_key,
+        base_url=settings.langfuse_base_url,
+        environment="eval",
+        enabled=settings.langfuse_enabled,
+    )
     try:
-        sys.exit(asyncio.run(handler[args.command](args, settings)))
+        code = asyncio.run(handler[args.command](args, settings))
     except EvalAborted as exc:
         print(f"\nABORTED: {exc}\nNo results were written for this run.", file=sys.stderr)
-        sys.exit(3)
+        code = 3
+    finally:
+        tracer.flush()
+        usage = PROCESS_METER.summary()
+        print(
+            f"\nLLM usage this run: {usage['calls']} calls, {usage['tokens']:,} tokens, "
+            f"${usage['cost_usd']:.4f}  {json.dumps(usage['by_model'])}"
+        )
+        if tracer.enabled:
+            print(f"Langfuse: traces tagged run:{args.run_id}")
+    sys.exit(code)

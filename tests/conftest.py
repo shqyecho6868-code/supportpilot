@@ -62,6 +62,8 @@ def settings() -> Settings:
         redis_url=TEST_REDIS_URL,
         llm_provider="rule_based",
         anthropic_api_key=None,
+        long_term_memory=False,
+        langfuse_enabled=False,
     )
 
 
@@ -96,6 +98,32 @@ async def client(settings, clean_state) -> AsyncIterator[httpx.AsyncClient]:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test", timeout=30) as c:
             yield c
+
+
+@pytest.fixture
+async def make_client(settings, clean_state):
+    """Factory for an API client with custom settings / LLM / long-term memory.
+
+    Yields ``open(**overrides) -> (client, app)``; everything is closed at teardown.
+    """
+    from contextlib import AsyncExitStack
+
+    from supportpilot.api.app import create_app
+
+    async with AsyncExitStack() as stack:
+
+        async def open_client(*, llm=None, long_term=None, **overrides):
+            app = create_app(
+                settings.model_copy(update=overrides), llm=llm or RuleBasedLLM(), long_term=long_term
+            )
+            await stack.enter_async_context(app.router.lifespan_context(app))
+            transport = httpx.ASGITransport(app=app)
+            c = await stack.enter_async_context(
+                httpx.AsyncClient(transport=transport, base_url="http://test", timeout=30)
+            )
+            return c, app
+
+        yield open_client
 
 
 def parse_sse(text: str) -> list[tuple[str, dict[str, Any]]]:

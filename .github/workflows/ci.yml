@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.cache/fastembed
+  MEM0_TELEMETRY: "False"
+
+jobs:
+  test:
+    name: Lint and unit tests (offline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: paradedb/paradedb:0.27.0-pg17
+        env:
+          POSTGRES_USER: supportpilot
+          POSTGRES_PASSWORD: supportpilot
+          POSTGRES_DB: supportpilot
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U supportpilot -d supportpilot"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - uses: actions/cache@v4
+        with:
+          path: .cache/fastembed
+          key: fastembed-${{ hashFiles('src/supportpilot/config.py') }}
+      - name: Ruff
+        run: uv run ruff check . && uv run ruff format --check .
+      - name: Tests (LLM_PROVIDER=rule_based, no API calls)
+        run: uv run pytest -q
+        env:
+          LLM_PROVIDER: rule_based
+
+  eval:
+    name: Eval gate (Haiku, CI subset)
+    if: github.event_name == 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: paradedb/paradedb:0.27.0-pg17
+        env:
+          POSTGRES_USER: supportpilot
+          POSTGRES_PASSWORD: supportpilot
+          POSTGRES_DB: supportpilot
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U supportpilot -d supportpilot"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+      LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
+    steps:
+      - name: Require the API key
+        if: env.ANTHROPIC_API_KEY == ''
+        run: |
+          echo "::error::ANTHROPIC_API_KEY secret is not set (pull requests from forks do not get secrets)."
+          exit 1
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - uses: actions/cache@v4
+        with:
+          path: .cache/fastembed
+          key: fastembed-${{ hashFiles('src/supportpilot/config.py') }}
+      - name: Compare the CI subset with its baseline (exit 1 on a reproducible >5pp regression)
+        run: >-
+          uv run supportpilot-eval compare --subset ci --baseline evals/baseline-ci.json
+          --results-name ci --tag ci --tag pr-${{ github.event.pull_request.number }}
+          --tag sha-${{ github.event.pull_request.head.sha }}
+      - name: Upload eval results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: evals/results/
+          if-no-files-found: ignore

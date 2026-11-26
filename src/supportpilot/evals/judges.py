@@ -17,6 +17,9 @@ from typing import Any
 import anthropic
 
 from supportpilot.kb.models import embed_passages, embed_query
+from supportpilot.llm.anthropic_llm import thinking_off
+from supportpilot.llm.usage import CallUsage, record
+from supportpilot.observability import get_tracer, preview
 
 log = logging.getLogger(__name__)
 
@@ -60,27 +63,36 @@ def raise_if_fatal(exc: BaseException) -> None:
         raise EvalAborted(str(exc)) from exc
 
 
-def thinking_off(model: str) -> dict[str, Any] | None:
-    """The request's `thinking` value that turns thinking off for this model, if it can be turned off.
-
-    Sonnet 5.5 rejects {"type": "disabled"} and uses "between_tools" instead; Opus 5.5 cannot turn
-    thinking off at all (None: leave the parameter out and rely on low effort).
-    """
-    if model.startswith("claude-opus-5-5") or model.startswith("claude-fable"):
-        return None
-    if model.startswith("claude-sonnet-5-5"):
-        return {"type": "between_tools"}
-    return {"type": "disabled"}
-
-
 def strip_citations(reply: str) -> str:
     return _CITATION.sub("", _SOURCES_FOOTER.sub("", reply)).strip()
+
+
+def metered_client(api_key: str | None, name: str) -> anthropic.AsyncAnthropic:
+    """An AsyncAnthropic whose messages.create records usage and a Langfuse generation.
+
+    Ragas (through instructor) calls ``client.messages.create`` itself, so the wrapper sits on the
+    client rather than around our own calls.
+    """
+    client = anthropic.AsyncAnthropic(api_key=api_key)
+    original = client.messages.create
+
+    async def create(*args: Any, **kwargs: Any):
+        model = kwargs.get("model", "")
+        with get_tracer().generation(name, model=model, input=preview(kwargs.get("messages", []))) as gen:
+            response = await original(*args, **kwargs)
+            usage = CallUsage.from_response(model, getattr(response, "usage", None))
+            record(usage)
+            gen.update(usage_details=usage.usage_details(), cost_details=usage.cost())
+            return response
+
+    client.messages.create = create  # type: ignore[method-assign]
+    return client
 
 
 class TaskJudge:
     def __init__(self, model: str, api_key: str | None = None):
         self.model = model
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+        self._client = metered_client(api_key, "task_judge")
 
     async def grade(
         self, *, message: str, history: list[dict[str, str]], reference: str, record: dict
@@ -93,7 +105,11 @@ class TaskJudge:
         ]
         events = []
         if record.get("confirmation"):
-            events.append("The system asked the customer to confirm a change; the customer approved it.")
+            events.append(
+                "Before the change tool ran, the system showed the customer a confirmation prompt with "
+                "the change, and the customer approved it there. This is the confirmation step; the "
+                "assistant itself does not need to ask again."
+            )
         body = (
             f"<earlier_conversation>\n{transcript or '(none)'}\n</earlier_conversation>\n"
             f"<customer_message>\n{message}\n</customer_message>\n"
@@ -151,7 +167,7 @@ class RagasScorer:
         llm = llm_factory(
             model,
             provider="anthropic",
-            client=anthropic.AsyncAnthropic(api_key=api_key),
+            client=metered_client(api_key, "ragas"),
             max_tokens=4096,
             **extra,
         )

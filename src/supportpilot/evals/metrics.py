@@ -9,10 +9,17 @@ from typing import Any
 
 from supportpilot.evals.cases import Case
 
-LOWER_IS_BETTER = frozenset({"agent.false_ticket_rate"})
+LOWER_IS_BETTER = frozenset({"agent.false_ticket_rate", "guard.false_positive_rate"})
 
-# Regressions larger than this (absolute, 0.05 = 5 percentage points) fail `compare`.
+# Regressions larger than this (absolute, 0.05 = 5 percentage points) fail `compare`...
 REGRESSION_THRESHOLD = 0.05
+# ...and larger than this many cases' worth of the metric (1.5 / n). On a small subset one case moves
+# a metric by 100/n points (14 points on 7 answers), so a fixed 5 points would fail on noise.
+MIN_REGRESSED_CASES = 1.5
+
+
+def threshold_for(n: int | None) -> float:
+    return max(REGRESSION_THRESHOLD, MIN_REGRESSED_CASES / n) if n else REGRESSION_THRESHOLD
 
 
 def mean(values: list[float]) -> float | None:
@@ -40,8 +47,13 @@ def tools_ok(case: Case, called: list[str]) -> bool:
     return not called_set & set(case.forbidden_tools)
 
 
-def compare(baseline: dict[str, float], current: dict[str, float]) -> tuple[list[dict[str, Any]], bool]:
-    """Rows for a comparison table, and whether any metric regressed beyond the threshold."""
+def compare(
+    baseline: dict[str, float], current: dict[str, float], counts: dict[str, int] | None = None
+) -> tuple[list[dict[str, Any]], bool]:
+    """Rows for a comparison table, and whether any metric regressed beyond its threshold.
+
+    ``counts`` is the number of cases behind each metric; without it the fixed threshold applies.
+    """
     rows = []
     failed = False
     for name in sorted(baseline):
@@ -56,7 +68,8 @@ def compare(baseline: dict[str, float], current: dict[str, float]) -> tuple[list
             continue
         delta = cur - base
         worse = -delta if name not in LOWER_IS_BETTER else delta
-        regressed = worse > REGRESSION_THRESHOLD + 1e-9
+        threshold = threshold_for((counts or {}).get(name))
+        regressed = worse > threshold + 1e-9
         failed |= regressed
         rows.append(
             {
@@ -64,6 +77,7 @@ def compare(baseline: dict[str, float], current: dict[str, float]) -> tuple[list
                 "baseline": base,
                 "current": cur,
                 "delta": delta,
+                "threshold": threshold,
                 "status": "REGRESSED" if regressed else "ok",
             }
         )

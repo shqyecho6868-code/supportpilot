@@ -12,6 +12,9 @@ import uuid
 from typing import Any
 
 from supportpilot.llm.base import Intent, LLMTurn, TextCallback
+from supportpilot.llm.usage import CallUsage, record
+
+MODEL_NAME = "rule-based"
 
 _ORDER_ID = re.compile(r"\bORD-\d{4}\b", re.IGNORECASE)
 _ADDRESS = re.compile(
@@ -36,6 +39,12 @@ def _text_of(message: dict[str, Any]) -> str:
     return " ".join(b.get("text", "") for b in content if b.get("type") == "text")
 
 
+def _record(messages: list[dict[str, Any]], system: str, output: str) -> None:
+    """Pretend token usage (~4 characters per token) so token limits can be tested offline."""
+    size = len(system) + len(json.dumps(messages, default=str))
+    record(CallUsage(MODEL_NAME, input_tokens=size // 4, output_tokens=len(output) // 4))
+
+
 def _emit(text: str, on_text: TextCallback) -> LLMTurn:
     for word in text.split(" "):
         on_text(word + " ")
@@ -49,6 +58,7 @@ def _tool_call(name: str, args: dict[str, Any]) -> LLMTurn:
 
 class RuleBasedLLM:
     async def classify_intent(self, system: str, messages: list[dict[str, Any]]) -> Intent:
+        _record(messages, system, "intent")
         text = _text_of(messages[-1])
         if _HANDOFF.search(text):
             return "handoff"
@@ -64,12 +74,47 @@ class RuleBasedLLM:
         match = _LATEST.search(_text_of(messages[-1]))
         return match["text"].strip() if match else ""
 
+    async def structured(
+        self,
+        name: str,
+        system: str,
+        messages: list[dict[str, Any]],
+        schema: dict[str, Any],
+        *,
+        max_tokens: int = 1024,
+    ) -> dict[str, Any] | None:
+        """Agentic-RAG decisions: always retrieve with the latest message; passages are enough
+        unless none were found, then retry once with "policy" appended."""
+        _record(messages, system, name)
+        text = _text_of(messages[-1])
+        if name == "retrieval_decision":
+            latest = _LATEST.search(text)
+            return {"retrieve": True, "query": latest["text"].strip() if latest else text, "reason": "rule"}
+        if name == "retrieval_grade":
+            sufficient = "<source " in text
+            return {
+                "sufficient": sufficient,
+                "missing": "" if sufficient else "everything",
+                "next_query": "policy",
+            }
+        return None
+
     async def respond(
         self,
         system: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         on_text: TextCallback,
+        *,
+        system_suffix: str | None = None,
+        name: str = "respond",
+    ) -> LLMTurn:
+        turn = await self._respond(messages, tools, on_text)
+        _record(messages, system + (system_suffix or ""), turn.text)
+        return turn
+
+    async def _respond(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], on_text: TextCallback
     ) -> LLMTurn:
         last = messages[-1]
         if isinstance(last["content"], list) and any(b.get("type") == "tool_result" for b in last["content"]):

@@ -213,18 +213,45 @@ async def test_turns_are_stored_in_short_term_memory(client):
     assert ttl > 0
 
 
-async def test_paused_turn_is_written_to_memory_after_confirmation(client):
+async def test_paused_turn_is_recorded_as_pending_then_replaced_on_confirmation(client):
+    import json
+
     from redis.asyncio import Redis
 
-    from supportpilot.memory import ConversationMemory  # noqa: F401  (documented behaviour)
     from tests.conftest import TEST_REDIS_URL
 
     turn = await chat(client, ALICE, CHANGE_1001, session_id="s-hitl")
     redis = Redis.from_url(TEST_REDIS_URL)
-    assert await redis.llen("sp:session:s-hitl:history") == 0
+    pending = [json.loads(x) for x in await redis.lrange("sp:session:s-hitl:history", 0, -1)]
+    assert len(pending) == 2
+    assert pending[0]["content"] == CHANGE_1001
+    assert "awaiting the customer's confirmation; it has NOT been applied" in pending[1]["actions"][-1]
+
     await confirm(client, ALICE, turn["confirmation"]["thread_id"], "approve")
-    assert await redis.llen("sp:session:s-hitl:history") == 2
+    done = [json.loads(x) for x in await redis.lrange("sp:session:s-hitl:history", 0, -1)]
     await redis.aclose()
+    assert len(done) == 2  # replaced, not appended
+    assert any("succeeded" in a for a in done[1]["actions"])
+    assert "San Francisco" in done[1]["content"]
+
+
+async def test_unconfirmed_turn_is_in_memory_for_the_next_turn(client):
+    """P1 leftover: a customer who skips the confirmation and moves on must not lose that turn."""
+    import json
+
+    from redis.asyncio import Redis
+
+    from tests.conftest import TEST_REDIS_URL
+
+    await chat(client, ALICE, CHANGE_1001, session_id="s-skip")
+    await chat(client, ALICE, "What is the status of ORD-1002?", session_id="s-skip")
+    redis = Redis.from_url(TEST_REDIS_URL)
+    history = [json.loads(x) for x in await redis.lrange("sp:session:s-skip:history", 0, -1)]
+    await redis.aclose()
+    assert [h["role"] for h in history] == ["user", "assistant", "user", "assistant"]
+    assert history[0]["content"] == CHANGE_1001
+    assert "NOT been applied" in history[1]["actions"][-1]
+    assert (await fetch_order("ORD-1001"))["address_events"] == 0
 
 
 async def test_session_cannot_be_hijacked_by_another_user(client):

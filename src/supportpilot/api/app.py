@@ -6,6 +6,8 @@ session or JWT). It is the *only* source of identity -- the agent and tools
 never accept a user id from the model or the request body.
 """
 
+import asyncio
+import datetime as dt
 import json
 import logging
 import uuid
@@ -26,10 +28,14 @@ from supportpilot.api.schemas import ChatRequest, ConfirmRequest, ConfirmRespons
 from supportpilot.config import Settings, get_settings
 from supportpilot.db import create_pool
 from supportpilot.graph import GraphDeps, build_graph
+from supportpilot.graph.builder import _action_log, pending_turn_record
 from supportpilot.kb import RetrievalConfig, Retriever
 from supportpilot.llm import LLMClient, build_llm
+from supportpilot.llm.usage import metered
+from supportpilot.longterm import BackgroundTasks, LongTermMemory, build_long_term_memory
 from supportpilot.mcp_server import build_mcp_server
 from supportpilot.memory import ConversationMemory, SessionOwnershipError
+from supportpilot.observability import configure_tracing
 from supportpilot.tools import ToolGateway
 
 log = logging.getLogger("supportpilot")
@@ -42,9 +48,16 @@ class AppContext:
     redis: Redis
     memory: ConversationMemory
     graph: Any
+    long_term: LongTermMemory
+    background: BackgroundTasks
+    tracer: Any
 
 
-def create_app(settings: Settings | None = None, llm: LLMClient | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    llm: LLMClient | None = None,
+    long_term: LongTermMemory | None = None,
+) -> FastAPI:
     settings = settings or get_settings()
 
     @asynccontextmanager
@@ -58,18 +71,38 @@ def create_app(settings: Settings | None = None, llm: LLMClient | None = None) -
             memory = ConversationMemory(
                 redis, max_messages=settings.memory_max_messages, ttl_seconds=settings.memory_ttl_seconds
             )
+            tracer = configure_tracing(
+                public_key=settings.langfuse_public_key,
+                secret_key=settings.langfuse_secret_key,
+                base_url=settings.langfuse_base_url,
+                environment=settings.app_environment,
+                enabled=settings.langfuse_enabled,
+            )
+            lt_memory = long_term or build_long_term_memory(settings)
             deps = GraphDeps(
                 llm=llm or build_llm(settings),
                 tools=ToolGateway(
-                    build_mcp_server(pool, Retriever(pool, RetrievalConfig.from_settings(settings)))
+                    build_mcp_server(pool, Retriever(pool, RetrievalConfig.from_settings(settings))),
+                    guard=settings.injection_guard,
                 ),
                 memory=memory,
                 max_agent_steps=settings.max_agent_steps,
                 query_rewrite=settings.retrieval_query_rewrite,
+                agentic_rag=settings.agentic_rag,
+                agentic_max_rewrites=settings.agentic_rag_max_rewrites,
+                token_limit=settings.conversation_token_limit,
+                confirmation_ttl_seconds=settings.confirmation_ttl_seconds,
+                injection_guard=settings.injection_guard,
+                long_term=lt_memory,
             )
-            app.state.ctx = AppContext(settings, pool, redis, memory, build_graph(deps, checkpointer))
+            background = BackgroundTasks()
+            app.state.ctx = AppContext(
+                settings, pool, redis, memory, build_graph(deps, checkpointer), lt_memory, background, tracer
+            )
             yield
+            await background.drain()
         finally:
+            tracer.flush()
             await redis.aclose()
             await pool.close()
 
@@ -112,6 +145,52 @@ def create_app(settings: Settings | None = None, llm: LLMClient | None = None) -
         }
         return JSONResponse(body, status_code=200 if healthy else 503)
 
+    def trace_tags(kind: str) -> list[str]:
+        tags = [kind, f"env:{settings.app_environment}", f"model:{settings.anthropic_model}"]
+        if settings.agentic_rag:
+            tags.append("agentic_rag")
+        return tags
+
+    async def finish_turn(
+        ctx: AppContext, user_id: str, session_id: str, thread_id: str, user_message: str, meter, root
+    ) -> dict[str, Any]:
+        """Book-keeping after a turn (or a resumed turn) ran: tokens, pending record, long-term memory."""
+        total = await ctx.memory.add_tokens(session_id, meter.total_tokens)
+        state = await ctx.graph.aget_state({"configurable": {"thread_id": thread_id}})
+        values = state.values
+        if state.interrupts:
+            # Paused for confirmation: record the turn now, so it is in the conversation even if the
+            # customer never answers. Completing the turn replaces this entry (same turn id).
+            prompt, actions = pending_turn_record(values, state.interrupts[0].value["message"])
+            await ctx.memory.append_turn(session_id, user_message, prompt, actions=actions, turn_id=thread_id)
+            result = {"thread_id": thread_id, **state.interrupts[0].value}
+        else:
+            reply = values.get("reply") or ""
+            result = {"thread_id": thread_id, "reply": reply}
+            actions = _action_log(values.get("messages") or [])
+            exchange = [{"role": "user", "content": user_message}, {"role": "assistant", "content": reply}]
+            if actions:
+                exchange[1]["content"] = f"{reply}\n(Actions taken: {'; '.join(actions)})"
+            ctx.background.spawn(
+                ctx.long_term.remember(user_id, exchange, {"session_id": session_id, "thread_id": thread_id})
+            )
+        usage = {
+            "turn_tokens": meter.total_tokens,
+            "turn_cost_usd": round(meter.cost, 6),
+            "session_tokens": total,
+        }
+        root.update(
+            output=result.get("reply") or {"confirmation_required": result.get("message")},
+            metadata={
+                "route": values.get("intent"),
+                "injection": values.get("injection"),
+                "over_budget": bool(values.get("over_budget")),
+                **usage,
+                "by_model": meter.by_model(),
+            },
+        )
+        return {"interrupted": bool(state.interrupts), "result": result, "usage": usage}
+
     @app.post("/chat")
     async def chat(
         body: ChatRequest,
@@ -131,26 +210,56 @@ def create_app(settings: Settings | None = None, llm: LLMClient | None = None) -
             "session_id": session_id,
             "user_message": body.message,
             "history": await ctx.memory.history(session_id),
+            "turn_id": thread_id,
+            "tokens_used": await ctx.memory.tokens_used(session_id),
         }
 
         def sse(event: str, data: dict[str, Any]) -> dict[str, str]:
             return {"event": event, "data": json.dumps(data)}
 
-        async def events() -> AsyncIterator[dict[str, str]]:
-            yield sse("meta", {"session_id": session_id, "thread_id": thread_id})
+        queue: asyncio.Queue[dict[str, str] | None] = asyncio.Queue()
+
+        async def run_turn() -> None:
+            # Runs in its own task, so the trace context and the usage meter cover exactly one turn
+            # and are not disturbed by the SSE generator being suspended between events.
             try:
-                async for chunk in ctx.graph.astream(initial, config, stream_mode="custom"):
-                    yield sse(chunk["type"], chunk)
-                state = await ctx.graph.aget_state(config)
-                if state.interrupts:
-                    yield sse("confirmation_required", {"thread_id": thread_id, **state.interrupts[0].value})
+                with (
+                    metered() as meter,
+                    ctx.tracer.trace(
+                        "chat_turn",
+                        user_id=user_id,
+                        session_id=session_id,
+                        tags=trace_tags("chat"),
+                        metadata={"thread_id": thread_id},
+                        input=body.message,
+                    ) as root,
+                ):
+                    async for chunk in ctx.graph.astream(initial, config, stream_mode="custom"):
+                        await queue.put(sse(chunk["type"], chunk))
+                    done = await finish_turn(ctx, user_id, session_id, thread_id, body.message, meter, root)
+                if done["interrupted"]:
+                    await queue.put(sse("confirmation_required", done["result"]))
                 else:
-                    yield sse("final", {"thread_id": thread_id, "reply": state.values.get("reply")})
+                    await queue.put(sse("final", done["result"]))
+                await queue.put(sse("usage", done["usage"]))
             except Exception:
                 log.exception("chat turn failed (thread %s)", thread_id)
-                yield sse(
-                    "error", {"thread_id": thread_id, "message": "Something went wrong. Please try again."}
+                await queue.put(
+                    sse(
+                        "error",
+                        {"thread_id": thread_id, "message": "Something went wrong. Please try again."},
+                    )
                 )
+            finally:
+                ctx.tracer.flush()
+                await queue.put(None)
+
+        async def events() -> AsyncIterator[dict[str, str]]:
+            yield sse("meta", {"session_id": session_id, "thread_id": thread_id})
+            task = ctx.background.spawn(run_turn())
+            while (item := await queue.get()) is not None:
+                yield item
+            await task
             yield sse("done", {})
 
         return EventSourceResponse(events())
@@ -174,10 +283,45 @@ def create_app(settings: Settings | None = None, llm: LLMClient | None = None) -
             state = await ctx.graph.aget_state(config)
             if not state.interrupts:
                 raise HTTPException(409, "No pending confirmation for this thread")
-            await ctx.graph.ainvoke(Command(resume=body.decision), config)
+            pending = state.interrupts[0].value
+            expires_at = pending.get("expires_at")
+            expired = bool(expires_at) and dt.datetime.now(dt.UTC) > dt.datetime.fromisoformat(expires_at)
+            decision = "expired" if expired else body.decision
+            session_id = state.values["session_id"]
+            with (
+                metered() as meter,
+                ctx.tracer.trace(
+                    "confirm",
+                    user_id=user_id,
+                    session_id=session_id,
+                    tags=trace_tags("confirm"),
+                    metadata={"thread_id": body.thread_id, "decision": decision},
+                    input={"decision": body.decision, "pending": pending},
+                ) as root,
+            ):
+                # An expired request is resumed too, so the turn ends cleanly (nothing applied) and the
+                # conversation records that it expired.
+                await ctx.graph.ainvoke(Command(resume=decision), config)
+                await finish_turn(
+                    ctx, user_id, session_id, body.thread_id, state.values["user_message"], meter, root
+                )
+            ctx.tracer.flush()
             state = await ctx.graph.aget_state(config)
         finally:
             await ctx.redis.delete(lock_key)
+
+        if expired:
+            raise HTTPException(
+                410,
+                {
+                    "error": "confirmation_expired",
+                    "message": (
+                        f"This confirmation request expired at {expires_at}. Nothing was changed; "
+                        "please ask again if you still want the change."
+                    ),
+                    "expires_at": expires_at,
+                },
+            )
 
         if state.interrupts:
             return ConfirmResponse(
@@ -199,5 +343,5 @@ def create_app(settings: Settings | None = None, llm: LLMClient | None = None) -
 def main() -> None:
     import uvicorn
 
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     uvicorn.run(create_app(), host="0.0.0.0", port=8000)

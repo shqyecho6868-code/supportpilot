@@ -33,7 +33,24 @@ class LLMClient(Protocol):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         on_text: TextCallback,
-    ) -> LLMTurn: ...
+        *,
+        system_suffix: str | None = None,
+        name: str = "respond",
+    ) -> LLMTurn:
+        """One assistant turn. ``system_suffix`` is per-turn context appended after the cached prompt."""
+        ...
+
+    async def structured(
+        self,
+        name: str,
+        system: str,
+        messages: list[dict[str, Any]],
+        schema: dict[str, Any],
+        *,
+        max_tokens: int = 1024,
+    ) -> dict[str, Any] | None:
+        """A small JSON decision (fast model). None if the model refused or broke the schema."""
+        ...
 
     async def rewrite_query(self, system: str, messages: list[dict[str, Any]]) -> str:
         """Turn the latest message (plus conversation context) into a standalone search query."""

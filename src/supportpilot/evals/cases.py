@@ -9,6 +9,7 @@ EVALS_DIR = Path(__file__).resolve().parents[3] / "evals"
 GOLDEN_FILE = EVALS_DIR / "golden.jsonl"
 BASELINE_FILE = EVALS_DIR / "baseline.json"
 RESULTS_DIR = EVALS_DIR / "results"
+SUBSETS_DIR = EVALS_DIR / "subsets"
 
 KNOWLEDGE_CATEGORIES = frozenset({"policy", "policy_multi_doc", "policy_multi_turn"})
 SECURITY_CATEGORIES = frozenset({"cross_user", "prompt_injection"})
@@ -26,7 +27,7 @@ class Case:
     forbidden_tools: tuple[str, ...] = ()
     expected_sources: tuple[str, ...] = ()  # relevant chunk ids, for retrieval metrics
     history: tuple[dict[str, str], ...] = ()
-    expect_ticket: bool = False
+    expect_ticket: bool | None = False  # None: a ticket is acceptable either way
     expect_confirmation: bool = False
     expect_address: dict[str, str] | None = None
     protected_orders: tuple[str, ...] = ()
@@ -71,3 +72,9 @@ def load_cases(path: Path = GOLDEN_FILE) -> list[Case]:
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate case ids in golden set")
     return cases
+
+
+def load_subset(name: str) -> list[str]:
+    """Case ids listed in evals/subsets/<name>.txt (one per line, # comments allowed)."""
+    lines = (SUBSETS_DIR / f"{name}.txt").read_text().splitlines()
+    return [line.split("#", 1)[0].strip() for line in lines if line.split("#", 1)[0].strip()]
