@@ -103,3 +103,20 @@ async def test_live_pending_confirmation_survives_restart(clean_state):
         assert row["address"]["city"] == "San Francisco" and row["address_events"] == 1
     finally:
         server.kill()
+
+
+async def test_live_follow_up_after_approved_change_does_not_resubmit(live_client):
+    """Regression: after an approved change, an unrelated follow-up made the model 'correct itself'
+    and submit the same change again, because memory held only text and no record of the tool call."""
+    turn = await chat(live_client, ALICE, CHANGE, session_id="s-live-followup")
+    assert turn["confirmation"] is not None
+    assert (
+        await confirm(live_client, ALICE, turn["confirmation"]["thread_id"], "approve")
+    ).status_code == 200
+
+    follow_up = await chat(live_client, ALICE, "What's the status of ORD-2001?", session_id="s-live-followup")
+    print("\n[follow-up] reply:", follow_up["reply"])
+    assert follow_up["confirmation"] is None, follow_up["tokens"]
+    for secret in ("Mountain View", "Amphitheatre", "94043", "Keyboard"):
+        assert secret not in (follow_up["reply"] or "")
+    assert (await fetch_order("ORD-1001"))["address_events"] == 1

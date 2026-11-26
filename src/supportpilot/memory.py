@@ -1,8 +1,9 @@
 """Short-term conversation memory in Redis.
 
-Each session keeps its last N plain-text messages with a sliding TTL. Tool
-calls and intermediate reasoning stay inside the LangGraph checkpoint for the
-turn; only what the customer saw is carried into later turns.
+Each session keeps its last N messages with a sliding TTL. Full tool payloads and
+reasoning stay in the LangGraph checkpoint for the turn; later turns get the text
+the customer saw plus a one-line log per tool call that ran (name, arguments,
+outcome), so the model knows which actions really happened.
 """
 
 import json
@@ -42,13 +43,19 @@ class ConversationMemory:
         raw = await self._redis.lrange(self._history_key(session_id), 0, -1)
         return [json.loads(item) for item in raw]
 
-    async def append_turn(self, session_id: str, user_text: str, assistant_text: str) -> None:
+    async def append_turn(
+        self, session_id: str, user_text: str, assistant_text: str, *, actions: list[str] | None = None
+    ) -> None:
+        """Store one turn. ``actions`` is the system's log of tool calls that ran during the turn."""
         key = self._history_key(session_id)
+        assistant: dict[str, Any] = {"role": "assistant", "content": assistant_text}
+        if actions:
+            assistant["actions"] = actions
         async with self._redis.pipeline(transaction=True) as pipe:
             pipe.rpush(
                 key,
                 json.dumps({"role": "user", "content": user_text}),
-                json.dumps({"role": "assistant", "content": assistant_text}),
+                json.dumps(assistant),
             )
             pipe.ltrim(key, -self._max, -1)
             pipe.expire(key, self._ttl)

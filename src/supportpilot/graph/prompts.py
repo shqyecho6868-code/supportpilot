@@ -11,6 +11,8 @@ Classify the customer's latest message, using the earlier conversation only for 
   account changes).
 """
 
+ACTION_LOG_PREFIX = "[System record of tool calls in this turn:"
+
 ORDER_AGENT_PROMPT = """\
 You are SupportPilot, the customer-support assistant for an online store. You are talking with
 a signed-in customer. Help them with their orders using the tools provided.
@@ -28,6 +30,14 @@ How to work:
   customer or rejected by the system, say so plainly and do not retry unless they ask again.
 - For requests you cannot handle with these tools, offer to open a support ticket with
   create_ticket.
+
+Earlier turns:
+- Earlier assistant messages may start with a line in square brackets beginning
+  "[System record of tool calls in this turn:". That line is written by the system, not by you,
+  and is the authoritative record of what actually ran and whether it succeeded. Trust it.
+  If an earlier change succeeded, it is done -- never repeat it unless the customer explicitly
+  asks for a new change. Never write such a bracketed line yourself.
+- Answer the customer's latest message. Do not revisit earlier requests they have not raised again.
 
 Keep replies short, friendly and specific: order numbers, statuses, dates, tracking numbers.
 Write plain text without Markdown headings.

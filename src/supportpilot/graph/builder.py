@@ -20,7 +20,12 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from supportpilot.graph.prompts import KNOWLEDGE_PLACEHOLDER_REPLY, ORDER_AGENT_PROMPT, ROUTER_PROMPT
+from supportpilot.graph.prompts import (
+    ACTION_LOG_PREFIX,
+    KNOWLEDGE_PLACEHOLDER_REPLY,
+    ORDER_AGENT_PROMPT,
+    ROUTER_PROMPT,
+)
 from supportpilot.graph.state import TurnState
 from supportpilot.llm import LLMClient
 from supportpilot.memory import ConversationMemory
@@ -45,11 +50,50 @@ def _tool_result(tool_use_id: str, content: str, is_error: bool) -> dict[str, An
     return {"type": "tool_result", "tool_use_id": tool_use_id, "content": content, "is_error": is_error}
 
 
+def _render(entry: dict[str, Any]) -> dict[str, Any]:
+    """Turn a memory entry into a message, prefixing the system's record of tool activity."""
+    content = entry["content"]
+    if entry.get("actions"):
+        content = f"{ACTION_LOG_PREFIX} {'; '.join(entry['actions'])}]\n{content}"
+    return {"role": entry["role"], "content": content}
+
+
 def _conversation(state: TurnState) -> list[dict[str, Any]]:
     history = list(state.get("history") or [])
     while history and history[0]["role"] != "user":  # API requires a user turn first
         history.pop(0)
-    return [*history, {"role": "user", "content": state["user_message"]}]
+    return [*(_render(e) for e in history), {"role": "user", "content": state["user_message"]}]
+
+
+def _describe_args(args: dict[str, Any]) -> str:
+    if "street" in args:
+        address = ", ".join(
+            str(args.get(k, "")) for k in ("street", "city", "state", "postal_code", "country")
+        )
+        return f"{args.get('order_id', '?')} -> {address}"
+    return ", ".join(f"{k}={v}" for k, v in args.items() if k != "description") or "-"
+
+
+def _action_log(messages: list[dict[str, Any]]) -> list[str]:
+    """Summarize every tool call that actually ran this turn, and how it ended."""
+    calls: dict[str, dict[str, Any]] = {}
+    log: list[str] = []
+    for message in messages:
+        if not isinstance(message["content"], list):
+            continue
+        for block in message["content"]:
+            if block["type"] == "tool_use":
+                calls[block["id"]] = block
+            elif block["type"] == "tool_result" and block["tool_use_id"] in calls:
+                call = calls[block["tool_use_id"]]
+                if block["is_error"]:
+                    outcome = "FAILED: " + block["content"].removeprefix(
+                        f"Error executing tool {call['name']}: "
+                    )
+                else:
+                    outcome = "succeeded"
+                log.append(f"{call['name']}({_describe_args(call['input'])}) {outcome[:200]}")
+    return log
 
 
 def _emit_text(text: str) -> None:
@@ -122,6 +166,13 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
                 "the address can only be changed while the order is pending."
             )
 
+        elif json.loads(current.content)["shipping_address"] == {
+            k: args.get(k) for k in ("street", "city", "state", "postal_code", "country")
+        }:
+            precheck_error = (
+                f"The shipping address of {args['order_id']} is already this address; nothing to change."
+            )
+
         if precheck_error is not None:
             outcome = _tool_result(action["tool_use_id"], precheck_error, True)
         else:
@@ -181,7 +232,12 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
         return {"reply": reply}
 
     async def save_memory(state: TurnState) -> dict[str, Any]:
-        await deps.memory.append_turn(state["session_id"], state["user_message"], state.get("reply") or "")
+        await deps.memory.append_turn(
+            state["session_id"],
+            state["user_message"],
+            state.get("reply") or "",
+            actions=_action_log(state.get("messages") or []),
+        )
         return {}
 
     def route_intent(state: TurnState) -> Literal["order_agent", "knowledge_agent", "handoff"]:

@@ -211,3 +211,70 @@ async def test_health(client):
     resp = await client.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok", "postgres": "ok", "redis": "ok", "llm_provider": "rule_based"}
+
+
+# --- Action log in memory (regression: model re-submitted a change it had already made) ---
+
+
+async def test_memory_records_tool_calls_that_ran(client):
+    import json
+
+    from redis.asyncio import Redis
+
+    from tests.conftest import TEST_REDIS_URL
+
+    turn = await chat(client, ALICE, CHANGE_1001, session_id="s-log")
+    await confirm(client, ALICE, turn["confirmation"]["thread_id"], "approve")
+    await chat(client, ALICE, "What's the status of order ORD-2001?", session_id="s-log")
+
+    redis = Redis.from_url(TEST_REDIS_URL)
+    history = [json.loads(x) for x in await redis.lrange("sp:session:s-log:history", 0, -1)]
+    await redis.aclose()
+    first_actions, second_actions = history[1]["actions"], history[3]["actions"]
+    assert any(
+        a.startswith("update_address(ORD-1001 -> 500 Market St") and "succeeded" in a for a in first_actions
+    )
+    assert second_actions == [
+        "get_order(order_id=ORD-2001) FAILED: Order ORD-2001 was not found on your account."
+    ]
+
+
+async def test_rejected_change_is_logged_as_failed(client):
+    import json
+
+    from redis.asyncio import Redis
+
+    from tests.conftest import TEST_REDIS_URL
+
+    turn = await chat(client, ALICE, CHANGE_1001, session_id="s-rej")
+    await confirm(client, ALICE, turn["confirmation"]["thread_id"], "reject")
+    redis = Redis.from_url(TEST_REDIS_URL)
+    history = [json.loads(x) for x in await redis.lrange("sp:session:s-rej:history", 0, -1)]
+    await redis.aclose()
+    assert "FAILED: The customer declined" in history[1]["actions"][0]
+
+
+def test_action_log_is_rendered_into_the_next_turns_prompt():
+    from supportpilot.graph.builder import _conversation
+
+    state = {
+        "user_message": "And ORD-1002?",
+        "history": [
+            {"role": "user", "content": "change it"},
+            {"role": "assistant", "content": "Done.", "actions": ["update_address(ORD-1001 -> X) succeeded"]},
+        ],
+    }
+    messages = _conversation(state)
+    assert messages[1]["content"].startswith("[System record of tool calls in this turn:")
+    assert "update_address(ORD-1001 -> X) succeeded" in messages[1]["content"]
+    assert set(messages[1]) == {"role", "content"}
+
+
+async def test_change_to_current_address_does_not_ask_for_confirmation(client):
+    turn = await chat(client, ALICE, CHANGE_1001)
+    await confirm(client, ALICE, turn["confirmation"]["thread_id"], "approve")
+
+    again = await chat(client, ALICE, CHANGE_1001)
+    assert again["confirmation"] is None
+    assert "already this address" in again["reply"]
+    assert (await fetch_order("ORD-1001"))["address_events"] == 1
