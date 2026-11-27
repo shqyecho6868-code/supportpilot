@@ -264,7 +264,9 @@ deterministic stand-in for Claude, against ParadeDB and Redis service containers
 then run the eval gate: a 17-case subset covering every route, the confirmation flow, isolation
 and injection, with Haiku as agent and grader (about $0.02), compared with
 `evals/baseline-ci.json`. The gate reranks with `jina-reranker-v1-tiny-en` to stay fast (see
-[Design decisions](#design-decisions)); TODO_CI_TIME
+[Design decisions](#design-decisions)); the eval job takes about 2 minutes
+(2 min 08 s on 2026-11-26, model download included; about 3.5 with the automatic re-run), down
+from 6.5 minutes per run (13 with the re-run) with v2-m3.
 
 Full write-up, raw numbers and every failure analysed:
 [docs/eval-report.md](docs/eval-report.md).

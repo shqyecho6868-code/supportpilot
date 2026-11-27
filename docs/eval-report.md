@@ -266,7 +266,7 @@ detector for the agent, prompts and tools. **All reported numbers (README, this 
 local runs with v2-m3.**
 
 Local timings of one CI-subset run (laptop): retrieval metrics 1.8 s and agent cases 47.6 s with
-jina-tiny, against 74 s and 217 s for the full 52-case run with v2-m3. CI timing is in the README.
+jina-tiny, against 74 s and 217 s for the full 52-case run with v2-m3. On GitHub the eval job now takes 2 min 08 s (model download included), down from 6.5 minutes per run.
 
 ### Refusal fallback
 
