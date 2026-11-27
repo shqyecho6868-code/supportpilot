@@ -28,6 +28,9 @@ CONFIRMATION_REQUIRED = frozenset({"update_address"})
 # (single-shot retrieval), so the order agent does not see it.
 ORDER_AGENT_TOOLS = frozenset({"get_order", "list_my_orders", "update_address", "create_ticket"})
 
+# The single-agent architecture (an evaluation baseline) gives one agent every tool.
+SINGLE_AGENT_TOOLS = ORDER_AGENT_TOOLS | {"search_policy"}
+
 # Parameters the orchestrator fills in; the model never sees or sets them.
 ORCHESTRATOR_PARAMS: dict[str, frozenset[str]] = {"update_address": frozenset({IDEMPOTENCY_KEY_PARAM})}
 

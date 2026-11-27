@@ -40,17 +40,19 @@ log = logging.getLogger(__name__)
 EVAL_DB = "supportpilot_eval"
 
 
-def eval_database_url(server_url: str) -> str:
-    return f"{server_url.rsplit('/', 1)[0]}/{EVAL_DB}"
+def eval_database_url(server_url: str, name: str = EVAL_DB) -> str:
+    return f"{server_url.rsplit('/', 1)[0]}/{name}"
 
 
-async def prepare_database(server_url: str, fast_model: str, embedding_model: str) -> str:
+async def prepare_database(
+    server_url: str, fast_model: str, embedding_model: str, name: str = EVAL_DB
+) -> str:
     """Create the eval database if needed and (re)index the knowledge base offline."""
     async with await psycopg.AsyncConnection.connect(server_url, autocommit=True) as conn:
-        cur = await conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (EVAL_DB,))
+        cur = await conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
         if await cur.fetchone() is None:
-            await conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(EVAL_DB)))
-    url = eval_database_url(server_url)
+            await conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    url = eval_database_url(server_url, name)
     await reset_database(url)
     await ingest(url, Contextualizer(fast_model, allow_generate=False), embedding_model)
     return url
@@ -95,6 +97,7 @@ class AgentRunner:
     query_rewrite: bool = True
     agentic_rag: bool = False
     injection_guard: bool = True
+    architecture: str = "routed"  # "routed" (router + specialist agents) or "single" (one agent)
     trace_tags: tuple[str, ...] = ()
     run_id: str = ""
 
@@ -128,9 +131,16 @@ class AgentRunner:
                 "id": case.id,
                 "error": repr(exc),
                 "route": None,
+                "routes": [],
                 "tools": [],
                 "reply": "",
                 "retrieval": None,
+                "confirmation": None,
+                "turns": None,
+                "tickets_created": 0,
+                "orders_before": {},
+                "orders_after": {},
+                "turn_seconds": [],
                 "injection_flags": {"user_input": [], "tool_results": []},
             }
         finally:
@@ -156,6 +166,7 @@ class AgentRunner:
                 query_rewrite=self.query_rewrite,
                 agentic_rag=self.agentic_rag,
                 injection_guard=self.injection_guard,
+                architecture=self.architecture,
             ),
             InMemorySaver(),
         )
@@ -166,49 +177,73 @@ class AgentRunner:
         )
         before = await _snapshot(self.database_url, watched)
 
-        config = {"configurable": {"thread_id": session_id}}
-        initial = {
-            "user_id": case.user_id,
-            "session_id": session_id,
-            "user_message": case.message,
-            "history": await memory.history(session_id),
-        }
-        started = time.monotonic()
-        route = None
+        # Every live message is one turn: its own graph thread, in the same session, as in the API.
+        turns: list[dict[str, Any]] = []
         guard_flags: list[str] = []
-        async for chunk in graph.astream(initial, config, stream_mode="custom"):
-            if chunk["type"] == "route":
-                route = chunk["intent"]
-            elif chunk["type"] == "guard":
-                guard_flags.extend(chunk["matches"])
-        state = await graph.aget_state(config)
-        confirmation = None
-        # Auto-approve confirmations (at most a few, in case the agent chains changes).
-        for _ in range(3):
-            if not state.interrupts:
-                break
-            confirmation = state.interrupts[0].value
-            await graph.ainvoke(Command(resume="approve"), config)
+        for message in case.messages:
+            config = {"configurable": {"thread_id": f"{session_id}:{len(turns)}"}}
+            initial = {
+                "user_id": case.user_id,
+                "session_id": session_id,
+                "user_message": message,
+                "history": await memory.history(session_id),
+                "turn_id": config["configurable"]["thread_id"],
+            }
+            first_call = len(gateway.calls)
+            started = time.monotonic()
+            route = None
+            async for chunk in graph.astream(initial, config, stream_mode="custom"):
+                if chunk["type"] == "route":
+                    route = chunk["intent"]
+                elif chunk["type"] == "guard":
+                    guard_flags.extend(chunk["matches"])
             state = await graph.aget_state(config)
+            # The customer-facing latency of the turn: until the reply or the confirmation prompt.
+            seconds = time.monotonic() - started
+            confirmation = None
+            # Auto-approve confirmations (at most a few, in case the agent chains changes).
+            for _ in range(3):
+                if not state.interrupts:
+                    break
+                confirmation = state.interrupts[0].value
+                resumed = time.monotonic()
+                await graph.ainvoke(Command(resume="approve"), config)
+                seconds += time.monotonic() - resumed
+                state = await graph.aget_state(config)
+            values = state.values
+            turns.append(
+                {
+                    "message": message,
+                    "route": route,
+                    "reply": values.get("reply") or "",
+                    "tools": gateway.calls[first_call:],
+                    "retrieval": values.get("retrieval"),
+                    "confirmation": confirmation,
+                    "seconds": round(seconds, 2),
+                }
+            )
         after = await _snapshot(self.database_url, watched)
-        values = state.values
-        reply = values.get("reply") or ""
-        retrieval = values.get("retrieval")
+        last = turns[-1]
+        reply = last["reply"]
+        retrieval = last["retrieval"]
         return {
             "id": case.id,
             "error": None,
-            "route": route,
+            "route": last["route"],
+            "routes": [t["route"] for t in turns],
             "tools": gateway.calls,
             "reply": reply,
             "retrieval": retrieval,
-            "confirmation": confirmation,
+            "confirmation": next((t["confirmation"] for t in reversed(turns) if t["confirmation"]), None),
+            "turns": turns if len(turns) > 1 else None,
             "tickets_created": after["tickets"] - before["tickets"],
             "orders_before": before["orders"],
             "orders_after": after["orders"],
             "model_cited": bool(
                 retrieval and cited_sources(reply.split("\n\nSources: ")[0], retrieval["results"])
             ),
-            "seconds": round(time.monotonic() - started, 2),
+            "seconds": round(sum(t["seconds"] for t in turns), 2),
+            "turn_seconds": [t["seconds"] for t in turns],
             "injection_flags": {
                 "user_input": guard_flags,
                 "tool_results": sorted({f for t in gateway.calls for f in t["injection_flags"]}),

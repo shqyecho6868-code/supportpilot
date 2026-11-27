@@ -37,6 +37,7 @@ class CallUsage:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    name: str = ""  # set for calls reported separately, e.g. long-term-memory extraction
 
     @classmethod
     def from_response(cls, model: str, usage: Any) -> "CallUsage":
@@ -113,6 +114,15 @@ class UsageMeter:
         out: dict[str, dict[str, float]] = {}
         for c in self.calls:
             row = out.setdefault(c.model, {"calls": 0, "tokens": 0, "cost_usd": 0.0})
+            row["calls"] += 1
+            row["tokens"] += c.total_tokens
+            row["cost_usd"] += c.cost()["total"]
+        return out
+
+    def by_name(self) -> dict[str, dict[str, float]]:
+        out: dict[str, dict[str, float]] = {}
+        for c in self.calls:
+            row = out.setdefault(c.name or "other", {"calls": 0, "tokens": 0, "cost_usd": 0.0})
             row["calls"] += 1
             row["tokens"] += c.total_tokens
             row["cost_usd"] += c.cost()["total"]

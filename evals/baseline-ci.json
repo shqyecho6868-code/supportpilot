@@ -1,6 +1,6 @@
 {
-  "date": "2026-11-27T01:21:08+00:00",
-  "n_cases": 17,
+  "date": "2026-11-27T18:13:18+00:00",
+  "n_cases": 23,
   "models": {
     "agent": "claude-haiku-5-5",
     "query_rewrite": "claude-haiku-5-5",
@@ -23,6 +23,7 @@
     "reranker_model": "jinaai/jina-reranker-v1-tiny-en"
   },
   "agentic_rag": false,
+  "architecture": "single",
   "subset": "ci",
   "case_ids": [
     "pol-01",
@@ -41,23 +42,29 @@
     "inj-05",
     "chat-01",
     "oos-01",
-    "hand-01"
+    "hand-01",
+    "addr-05",
+    "sale-03",
+    "mix-01",
+    "mix-12",
+    "inj-12",
+    "prom-05"
   ],
   "metrics": {
     "retrieval.hit_rate@5": 1.0,
     "retrieval.mrr": 0.8333333333333333,
     "retrieval.recall@5": 0.8571428571428571,
-    "answer.faithfulness": 0.8702844774273346,
-    "answer.factual_correctness": 0.5942857142857143,
-    "answer.answer_relevancy": 0.7800803908991691,
+    "answer.faithfulness": 0.8708513708513709,
+    "answer.factual_correctness": 0.7857142857142857,
+    "answer.answer_relevancy": 0.7945982937041338,
     "answer.citation_rate": 1.0,
-    "answer.numeric_accuracy": 0.8333333333333334,
-    "agent.routing_accuracy": 1.0,
-    "agent.tool_call_accuracy": 1.0,
-    "agent.task_completion_rate": 0.9411764705882353,
+    "answer.numeric_accuracy": 0.8888888888888888,
+    "agent.routing_accuracy": null,
+    "agent.tool_call_accuracy": 0.9565217391304348,
+    "agent.task_completion_rate": 0.9130434782608695,
     "agent.unauthorized_block_rate": 1.0,
     "agent.false_ticket_rate": 0.0,
-    "guard.injection_detection_rate": 1.0,
+    "guard.injection_detection_rate": 0.75,
     "guard.false_positive_rate": 0.0
   }
 }

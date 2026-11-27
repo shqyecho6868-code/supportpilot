@@ -37,6 +37,7 @@ _WITH_UNIT = re.compile(
     re.I,
 )
 _MONEY = re.compile(rf"\$\s?(?P<a>{_NUM})", re.I)
+_USD = re.compile(rf"(?<![\w.])(?P<a>{_NUM})\s?USD\b")
 _BARE = re.compile(rf"(?<![\w.]){_NUM}(?![\w])", re.I)
 # Citations like [Returns Policy § Electronics] and the Sources footer carry no claims.
 _CITATION = re.compile(r"\[[^\[\]]*§[^\[\]]*\]")
@@ -64,6 +65,8 @@ def quantities(text: str) -> set[Quantity]:
         if m["b"]:
             found.add((_value(m["b"]), unit))
     for m in _MONEY.finditer(text):
+        found.add((_value(m["a"]), "$"))
+    for m in _USD.finditer(text):  # tool results state amounts as "129.99 USD"
         found.add((_value(m["a"]), "$"))
     return found
 

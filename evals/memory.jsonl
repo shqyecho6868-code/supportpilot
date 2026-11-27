@@ -1,0 +1,22 @@
+{"id": "mem-01", "messages": ["I'm a Larkspur Plus member. How long do I have to return a jacket?"], "probe": "Is the customer a Plus member?", "expect": [["plus"]]}
+{"id": "mem-02", "messages": ["I just moved to 12 Oak Ave, Portland, OR 97201. How long does standard shipping take to Oregon?"], "probe": "customer's home address", "expect": [["oak ave", "portland"]]}
+{"id": "mem-03", "messages": ["Please always leave my packages at the back door. Which carriers do you ship with?"], "probe": "delivery instructions for packages", "expect": [["back door"]]}
+{"id": "mem-04", "messages": ["The headphones I bought from you stopped working after a month. Is that covered by the warranty?"], "probe": "problems with products the customer bought", "expect": [["headphone"]]}
+{"id": "mem-05", "messages": ["I'm usually away on weekdays, so text me before a delivery. How fast is expedited shipping?"], "probe": "how to contact the customer about deliveries", "expect": [["text", "weekday"]]}
+{"id": "mem-06", "messages": ["I bought an office chair for my home office last month. What does the warranty cover on it?"], "probe": "products the customer owns", "expect": [["chair"]]}
+{"id": "mem-07", "messages": ["My name is Priya and I run a small bakery. Can my business get a sales tax exemption?"], "probe": "the customer's business", "expect": [["bakery"]]}
+{"id": "mem-08", "messages": ["My partner Sam lives with me. Can Sam use my Plus free shipping too?"], "probe": "people in the customer's household", "expect": [["sam"]]}
+{"id": "mem-09", "messages": ["I prefer FedEx over UPS. Can you send my orders with FedEx?"], "probe": "carrier preference", "expect": [["fedex"]]}
+{"id": "mem-10", "messages": ["My keyboard arrived with a cracked keycap. What should I do?"], "probe": "past problems with deliveries", "expect": [["keyboard", "keycap"]]}
+{"id": "mem-11", "messages": ["I live in Toronto. Do you ship to Canada, and who pays the customs duties?"], "probe": "where the customer lives", "expect": [["toronto"]]}
+{"id": "mem-12", "messages": ["I work night shifts, so please don't call me before noon. How long do PayPal refunds take?"], "probe": "when to contact the customer", "expect": [["noon", "night"]]}
+{"id": "mem-13", "messages": ["Deliveries should go to my building's front desk, not my apartment door. How much is standard shipping?"], "probe": "delivery instructions", "expect": [["front desk"]]}
+{"id": "mem-14", "messages": ["I'm buying holiday gifts for my team of 12. Can I use several gift cards on one order?"], "probe": "what the customer is shopping for", "expect": [["team", "gift"]]}
+{"id": "mem-15", "messages": ["My son cracked the screen of the tablet we bought here. Is that covered?"], "probe": "devices and damage", "expect": [["tablet"]]}
+{"id": "mem-16", "messages": ["Work orders should ship to my office at 233 S Wacker Dr, Chicago. Is overnight shipping available there?"], "probe": "customer's work address", "expect": [["wacker"]]}
+{"id": "mem-17", "messages": ["The laptop stand I got wobbles, I think it's defective. Can I exchange it for a new one?"], "probe": "product issues", "expect": [["laptop stand", "stand"]]}
+{"id": "mem-18", "messages": ["I'm thinking of cancelling my Plus membership at the end of the year. Would I lose free shipping right away?"], "probe": "the customer's membership", "expect": [["plus", "membership"]]}
+{"id": "mem-19", "messages": ["I ordered a sofa for my new apartment and it's too big for the elevator. Can furniture be returned?"], "probe": "what the customer bought", "expect": [["sofa"]]}
+{"id": "mem-20", "messages": ["Heads up, I'm a teacher and I stock up on classroom supplies every August. Do you run back-to-school sales?"], "probe": "the customer's job", "expect": [["teacher"]]}
+{"id": "mem-21", "messages": ["Our dog chews on cardboard, so please put small parcels in the mailbox instead of on the porch. How long does tracking take to show up?"], "probe": "delivery instructions", "expect": [["mailbox", "dog"]]}
+{"id": "mem-22", "messages": ["Change the shipping address of ORD-9022 to 9 Elm St, Boston, MA 02108, US."], "probe": "address changes the customer made", "expect": [["elm"]], "order": true}
