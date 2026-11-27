@@ -178,11 +178,13 @@ async def _tickets(user_id: str) -> list[str]:
 
 
 async def test_token_limit_ends_the_conversation_politely_and_hands_off(make_client):
-    client, _ = await make_client(conversation_token_limit=1000)
+    # A limit of one token: the first turn runs (nothing used yet), the second is over the limit.
+    # Independent of prompt length, which the rule-based stand-in turns into ~1 token per 4 characters.
+    client, _ = await make_client(conversation_token_limit=1)
     first = await chat(client, ALICE, "What is the status of ORD-1002?", session_id="s-budget")
     assert first["route"] == "order"
     usage = next(d for n, d in first["events"] if n == "usage")
-    assert usage["session_tokens"] >= 1000  # the rule-based stand-in reports ~4 characters per token
+    assert usage["session_tokens"] > 0
 
     second = await chat(client, ALICE, "And ORD-1003?", session_id="s-budget")
     assert second["route"] == "token_limit"
@@ -191,7 +193,7 @@ async def test_token_limit_ends_the_conversation_politely_and_hands_off(make_cli
 
 
 async def test_token_limit_is_per_conversation(make_client):
-    client, _ = await make_client(conversation_token_limit=1000)
+    client, _ = await make_client(conversation_token_limit=1)
     await chat(client, ALICE, "What is the status of ORD-1002?", session_id="s-a")
     fresh = await chat(client, ALICE, "What is the status of ORD-1002?", session_id="s-b")
     assert fresh["route"] == "order"
