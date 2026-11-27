@@ -8,7 +8,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     anthropic_api_key: str | None = None
-    anthropic_model: str = "claude-haiku-5-5"
+    # Production default. Local dev (.env) and CI override it with Haiku to save cost.
+    anthropic_model: str = "claude-sonnet-5-5"
     llm_provider: Literal["anthropic", "rule_based"] = "anthropic"
 
     database_url: str = "postgresql://supportpilot:supportpilot@localhost:5432/supportpilot"
