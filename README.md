@@ -140,7 +140,11 @@ the smaller CI reranker would cut most of that. The first policy question after 
 started took 228 s while the reranker model loaded; it is the maximum, so p50 and p95 do not
 include it, but a deployment should load the model at startup.
 
-<!-- TODO: Langfuse trace screenshot (docs/langfuse-trace.png) -->
+![Langfuse trace of one policy question: memory recall, guard, router, retrieval, answer, memory extraction](docs/langfuse-trace.png)
+
+<sub>One `chat_turn` trace in Langfuse: a policy question answered in 12.2 s for $0.002. Retrieval
+(7.8 s, reranking on CPU) is the slow step; the memory extraction after the reply is the
+expensive one ($0.0013 of $0.002).</sub>
 
 ## Design decisions
 
