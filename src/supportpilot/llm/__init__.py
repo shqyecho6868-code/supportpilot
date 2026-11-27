@@ -14,6 +14,7 @@ def build_llm(settings: Settings) -> LLMClient:
         api_key=settings.anthropic_api_key,
         fast_model=settings.fast_model,
         fallback_model=settings.fallback_model,
+        server_fallback=settings.server_side_fallback,
         timeout=settings.llm_timeout_seconds,
         max_retries=settings.llm_max_retries,
         retry_base_delay=settings.llm_retry_base_delay,

@@ -86,7 +86,8 @@ def _llm(script, model="claude-sonnet-5-5", **kw) -> tuple[AnthropicLLM, FakeMes
         fallback_model="claude-haiku-5-5",
         retry_base_delay=0.001,
         retry_max_delay=0.002,
-        client=SimpleNamespace(messages=messages),
+        # Sonnet requests go through the beta endpoint (server-side fallback), Haiku's through the plain one.
+        client=SimpleNamespace(messages=messages, beta=SimpleNamespace(messages=messages)),
         **kw,
     )
     return llm, messages

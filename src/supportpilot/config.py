@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # Reliability. Transient failures are retried with exponential backoff; if the main model
     # still fails (or does not exist) the call is repeated on fallback_model.
     fallback_model: str = "claude-haiku-5-5"
+    # Policy declines (stop_reason "refusal") on Sonnet 5.5 / Opus 5.5 are re-run by the API on its
+    # default fallback model (server-side fallback, `fallbacks: "default"`). Haiku has none.
+    server_side_fallback: bool = True
     llm_timeout_seconds: float = 60.0
     llm_max_retries: int = 3
     llm_retry_base_delay: float = 0.5

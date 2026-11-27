@@ -51,6 +51,23 @@ class CallUsage:
             cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
         )
 
+    @classmethod
+    def per_model(cls, model: str, usage: Any) -> list["CallUsage"]:
+        """One entry per model that ran in this request.
+
+        After a server-side fallback, ``usage.iterations`` lists the declined hop (``message``) and
+        the hop that served the reply (``fallback_message``), each with its own model and tokens;
+        each is billed at its own model's rates. Otherwise the request is one model's usage.
+        """
+        iterations = getattr(usage, "iterations", None) or []
+        if not any(getattr(it, "type", None) == "fallback_message" for it in iterations):
+            return [cls.from_response(model, usage)]
+        return [
+            cls.from_response(getattr(it, "model", None) or model, it)
+            for it in iterations
+            if getattr(it, "type", None) in ("message", "fallback_message")
+        ]
+
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_write_tokens
