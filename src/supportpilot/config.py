@@ -20,6 +20,10 @@ class Settings(BaseSettings):
 
     # Upper bound on model <-> tool round trips within a single user turn.
     max_agent_steps: int = 8
+    # "single": one agent holds every tool (default since P5). "routed": a router sends each turn to
+    # a specialist agent. Compared in docs/eval-report.md: the single agent completed more tasks,
+    # mixed-intent and multi-turn ones above all, at a lower median latency and the same cost.
+    agent_architecture: Literal["routed", "single"] = "single"
 
     # Small, fast model for query rewriting, agentic-RAG decisions, long-term memory extraction
     # and contextual-retrieval chunk context.
@@ -51,6 +55,13 @@ class Settings(BaseSettings):
     # sessions. Uses fast_model to extract memories after each turn.
     long_term_memory: bool = True
     long_term_memory_top_k: int = 5
+    # mem0 extraction (docs/eval-report.md, P5): cache mem0's fixed extraction prompt (default: -61%
+    # cost per turn, recall unchanged); "rules" sends only turns that can carry a durable fact
+    # (longterm.worth_remembering: a further -28%, but missed 2 of 22 facts, so off by default);
+    # sync awaits the extraction before the reply (only to measure the background path against).
+    long_term_memory_gate: Literal["rules", "all"] = "all"
+    long_term_memory_cache: bool = True
+    long_term_memory_sync: bool = False
     mem0_collection: str = "mem0_memories"
     mem0_history_db: str = ".mem0/history.db"
 

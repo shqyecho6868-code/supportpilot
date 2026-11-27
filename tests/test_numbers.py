@@ -55,3 +55,8 @@ def test_numbers_from_the_conversation_are_allowed():
     reply = "Even though it's been 40 days, exchanges are allowed within 45 days."
     check = check_numbers(reply, ["45 days"], ["exchanges within 45 days", "I got a sweater 40 days ago"])
     assert check.ok, check
+
+
+def test_amounts_from_tool_results_in_usd_support_dollar_figures_in_the_reply():
+    result = check_numbers("ORD-1001 totals $129.99.", [], ['{"total": "129.99 USD"}'])
+    assert result.supported

@@ -31,7 +31,7 @@ def stream_chat(client: httpx.Client, user: str, session: str, message: str) -> 
                 data = json.loads(line[5:].strip() or "{}")
                 if event == "token":
                     print(data["text"], end="", flush=True)
-                elif event == "route":
+                elif event == "route" and data["intent"] != "agent":  # the single agent has no router
                     print(f"[route: {data['intent']}] ", end="", flush=True)
                 elif event == "sources":
                     print(f"[search: {data['query']!r}] ", end="", flush=True)

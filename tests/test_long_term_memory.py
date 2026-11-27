@@ -77,3 +77,31 @@ def test_long_term_memory_can_be_switched_off(settings):
     assert isinstance(
         build_long_term_memory(settings.model_copy(update={"long_term_memory": False})), NullLongTermMemory
     )
+
+
+def test_rule_gate_keeps_turns_with_durable_facts_and_skips_lookups():
+    from supportpilot.longterm import worth_remembering
+
+    assert worth_remembering("I'm a Larkspur Plus member. How long do I have to return a jacket?", [])
+    assert worth_remembering("Please always leave my packages at the back door.", [])
+    assert worth_remembering("My headphones stopped working after a month.", [])
+    assert worth_remembering("Yes please", ["update_address(ORD-1001 -> 500 Market St) succeeded"])
+    assert not worth_remembering("Yes please", ["update_address(ORD-1001 -> 500 Market St) FAILED: shipped"])
+    assert not worth_remembering("How long do PayPal refunds take?", [])
+    assert not worth_remembering("Where is ORD-1002?", ["get_order(order_id=ORD-1002) succeeded"])
+
+
+async def test_gated_turns_skip_extraction(make_client):
+    memory = FakeLongTermMemory({})
+    client, app = await make_client(long_term=memory, long_term_memory_gate="rules")
+    await chat(client, BOB, "What is the status of ORD-2001?", session_id="s1")
+    await chat(client, BOB, "I'm a Plus member, by the way. Thanks!", session_id="s1")
+    await app.state.ctx.background.drain()
+    assert [m[0]["content"] for _, m, _ in memory.remembered] == ["I'm a Plus member, by the way. Thanks!"]
+
+
+async def test_sync_extraction_finishes_before_the_reply(make_client):
+    memory = FakeLongTermMemory({})
+    client, _ = await make_client(long_term=memory, long_term_memory_sync=True)
+    await chat(client, BOB, "What is the status of ORD-2001?", session_id="s1")
+    assert len(memory.remembered) == 1  # no drain needed

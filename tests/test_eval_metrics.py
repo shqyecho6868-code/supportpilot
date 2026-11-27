@@ -1,10 +1,12 @@
 """Offline checks of the evaluation metrics and the baseline comparison used by CI."""
 
+from collections import Counter
+
 import anthropic
 import httpx
 import pytest
 
-from supportpilot.evals.cases import Case, load_cases
+from supportpilot.evals.cases import CASE_TYPES, Case, load_cases
 from supportpilot.evals.judges import EvalAborted, raise_if_fatal
 from supportpilot.evals.metrics import compare, persistent_regressions, retrieval_scores, tools_ok
 from supportpilot.kb.documents import chunk_document, load_documents
@@ -13,6 +15,7 @@ from supportpilot.kb.documents import chunk_document, load_documents
 def _case(**kw) -> Case:
     base = {
         "id": "x",
+        "type": "policy",
         "category": "policy",
         "user_id": "u",
         "message": "m",
@@ -24,13 +27,17 @@ def _case(**kw) -> Case:
 
 def test_golden_set_is_well_formed():
     cases = load_cases()
-    assert len(cases) >= 40
+    assert len(cases) >= 100
     chunk_ids = {c.id for d in load_documents() for c in chunk_document(d)}
+    routes = {"order", "knowledge", "handoff", "smalltalk", "out_of_scope"}
     for case in cases:
         assert set(case.expected_sources) <= chunk_ids, case.id
-        assert all(
-            r in {"order", "knowledge", "handoff", "smalltalk", "out_of_scope"} for r in case.expected_route
-        )
+        assert set(case.expected_route) <= routes, case.id
+        assert all(set(r) <= routes for r in case.turn_routes), case.id
+    by_type = Counter(c.type for c in cases)
+    assert set(by_type) == set(CASE_TYPES)
+    assert by_type["adversarial"] >= 30
+    assert sum(1 for c in cases if c.turns) >= 10  # conversations run live, turn by turn
     categories = {c.category for c in cases}
     assert {"policy", "policy_multi_doc", "order", "address_change", "cross_user", "prompt_injection",
             "smalltalk", "out_of_scope", "handoff"} <= categories  # fmt: skip

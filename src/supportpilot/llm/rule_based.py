@@ -140,6 +140,12 @@ class RuleBasedLLM:
             )
         if order_match:
             return _tool_call("get_order", {"order_id": order_match.group(0).upper()})
+        if _KNOWLEDGE.search(text) and any(t["name"] == "search_policy" for t in tools):
+            return _tool_call("search_policy", {"query": text})
+        if _HANDOFF.search(text) and any(t["name"] == "create_ticket" for t in tools):
+            return _tool_call(
+                "create_ticket", {"subject": "Customer asked for a human agent", "description": text}
+            )
         if "orders" in text.lower():
             return _tool_call("list_my_orders", {})
         return _emit("I can help you track orders or update a pending order's shipping address.", on_text)
@@ -174,6 +180,15 @@ class RuleBasedLLM:
                 )
             elif name == "get_order":
                 lines.append(f"Order {data['order_id']} is {data['status']}.")
+            elif name == "search_policy":
+                hits = data["results"]
+                if hits:
+                    first = hits[0]["text"].split("\n\n", 1)[-1].split(". ")[0].rstrip(".")
+                    lines.append(f"{first}. [{hits[0]['source']}]")
+                else:
+                    lines.append("I couldn't find that in our policies.")
+            elif name == "create_ticket":
+                lines.append(f"I've opened ticket {data['ticket_id']}; a human agent will follow up.")
             elif name == "list_my_orders":
                 summary = ", ".join(f"{o['order_id']} ({o['status']})" for o in data["orders"])
                 lines.append(f"Your orders: {summary}.")

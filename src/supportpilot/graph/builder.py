@@ -8,6 +8,11 @@
                      +-> token_limit                (conversation token limit reached: ticket + goodbye)
              all of them end in save_memory -> END
 
+With ``architecture="single"`` (an evaluation baseline) there is no router: one agent holds every
+tool (orders, update_address, create_ticket, search_policy) and handles every message itself.
+
+    START -> screen -> agent <-> confirm -> save_memory -> END
+
 Before routing, the router screens the customer's message with the injection guard and recalls
 long-term memories; both reach the agents as per-turn system context.
 
@@ -43,6 +48,7 @@ from supportpilot.graph.prompts import (
     RETRIEVAL_DECISION_PROMPT,
     RETRIEVAL_GRADE_PROMPT,
     ROUTER_PROMPT,
+    SINGLE_AGENT_PROMPT,
     TOKEN_LIMIT_REPLY,
 )
 from supportpilot.graph.state import TurnState
@@ -52,7 +58,7 @@ from supportpilot.llm.usage import current_meter
 from supportpilot.longterm import LongTermMemory, NullLongTermMemory
 from supportpilot.memory import ConversationMemory
 from supportpilot.observability import get_tracer
-from supportpilot.tools import CONFIRMATION_REQUIRED, ORDER_AGENT_TOOLS, ToolGateway
+from supportpilot.tools import CONFIRMATION_REQUIRED, ORDER_AGENT_TOOLS, SINGLE_AGENT_TOOLS, ToolGateway
 
 STEP_LIMIT_REPLY = "Sorry, I wasn't able to finish that. I can open a ticket for a human agent if you'd like."
 DECLINED_RESULT = (
@@ -99,6 +105,8 @@ class GraphDeps:
     confirmation_ttl_seconds: int = 900
     injection_guard: bool = True
     long_term: LongTermMemory = NullLongTermMemory()
+    # "routed": router + specialist agents (production). "single": one agent with every tool.
+    architecture: Literal["routed", "single"] = "routed"
 
 
 def _tool_result(tool_use_id: str, content: str, is_error: bool) -> dict[str, Any]:
@@ -211,6 +219,18 @@ def pending_turn_record(values: dict[str, Any], prompt: str) -> tuple[str, list[
     return prompt, actions
 
 
+def _add_search(retrieval: dict[str, Any] | None, query: str, content: str) -> dict[str, Any]:
+    """Record a search_policy call made by a tool-using agent, like the knowledge agent's retrieval."""
+    hits = json.loads(content).get("results") or []
+    retrieval = retrieval or {"query": query, "queries": [], "results": []}
+    seen = {h["chunk_id"] for h in retrieval["results"]}
+    return {
+        **retrieval,
+        "queries": [*retrieval["queries"], query],
+        "results": [*retrieval["results"], *(h for h in hits if h["chunk_id"] not in seen)],
+    }
+
+
 def _grade_input(question: str, queries: list[str], hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     passages = "\n".join(f'<source cite="{html.escape(h["source"])}">\n{h["text"]}\n</source>' for h in hits)
     earlier = "\n".join(f"- {q}" for q in queries)
@@ -226,12 +246,9 @@ def _grade_input(question: str, queries: list[str], hits: list[dict[str, Any]]) 
 def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
     tracer = get_tracer()
 
-    async def router(state: TurnState) -> dict[str, Any]:
+    async def screen(state: TurnState) -> dict[str, Any]:
+        """Injection guard on the customer's message, and long-term memory recall."""
         writer = get_stream_writer()
-        if _over_budget(state, deps.token_limit):
-            writer({"type": "route", "intent": "token_limit"})
-            return {"intent": "token_limit"}
-
         updates: dict[str, Any] = {}
         if deps.injection_guard:
             with tracer.span("guard.user_input", as_type="guardrail", input=state["user_message"]) as obs:
@@ -241,14 +258,42 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
             if verdict.flagged:
                 writer({"type": "guard", "source": "user_input", "matches": list(verdict.matches)})
         updates["long_term"] = await deps.long_term.recall(state["user_id"], state["user_message"])
+        return updates
 
+    async def router(state: TurnState) -> dict[str, Any]:
+        writer = get_stream_writer()
+        if _over_budget(state, deps.token_limit):
+            writer({"type": "route", "intent": "token_limit"})
+            return {"intent": "token_limit"}
+
+        updates = await screen(state)
         with tracer.span("router", as_type="chain", input=state["user_message"]) as obs:
             intent = await deps.llm.classify_intent(ROUTER_PROMPT, _conversation(state))
             obs.update(output={"intent": intent})
         writer({"type": "route", "intent": intent})
         return {**updates, "intent": intent}
 
-    async def order_agent(state: TurnState) -> dict[str, Any]:
+    async def screen_only(state: TurnState) -> dict[str, Any]:
+        """Single-agent entry: the same guard and recall as the router, but no classification."""
+        writer = get_stream_writer()
+        if _over_budget(state, deps.token_limit):
+            writer({"type": "route", "intent": "token_limit"})
+            return {"intent": "token_limit"}
+        updates = await screen(state)
+        writer({"type": "route", "intent": "agent"})
+        return {**updates, "intent": "agent"}
+
+    def tool_agent(prompt: str, tool_names: frozenset[str], name: str):
+        """A tool-use loop node: the order agent, or the single agent that holds every tool."""
+
+        async def agent(state: TurnState) -> dict[str, Any]:
+            return await _tool_agent_step(state, prompt, tool_names, name)
+
+        return agent
+
+    async def _tool_agent_step(
+        state: TurnState, prompt: str, tool_names: frozenset[str], name: str
+    ) -> dict[str, Any]:
         messages = state.get("messages") or _conversation(state)
         steps = state.get("steps", 0)
         if steps >= deps.max_agent_steps:
@@ -258,18 +303,19 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
             return {"over_budget": True, "messages": messages}
 
         turn = await deps.llm.respond(
-            ORDER_AGENT_PROMPT,
+            prompt,
             messages,
-            await deps.tools.model_tools(ORDER_AGENT_TOOLS),
+            await deps.tools.model_tools(tool_names),
             _emit_text,
             system_suffix=_turn_context(state),
-            name="order_agent",
+            name=name,
         )
         messages = [*messages, {"role": "assistant", "content": turn.content}]
         if not turn.tool_uses:
             return {"messages": messages, "reply": turn.text, "steps": steps + 1, "pending_action": None}
 
         # Run read-only tools now; hold back at most one mutating tool for confirmation.
+        retrieval = state.get("retrieval")
         results: list[dict[str, Any]] = []
         pending: dict[str, Any] | None = None
         for call in turn.tool_uses:
@@ -291,12 +337,34 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
                 continue
             result = await deps.tools.call(call["name"], call["input"], user_id=state["user_id"])
             results.append(_tool_result(call["id"], result.content, result.is_error))
+            if call["name"] == "search_policy" and not result.is_error:
+                retrieval = _add_search(retrieval, call["input"].get("query", ""), result.content)
+                hits = json.loads(result.content).get("results") or []
+                get_stream_writer()(
+                    {
+                        "type": "sources",
+                        "query": call["input"].get("query"),
+                        "sources": [h["source"] for h in hits],
+                    }
+                )
 
         if pending is not None:
             pending["completed_results"] = results
-            return {"messages": messages, "pending_action": pending, "steps": steps + 1, "reply": None}
+            return {
+                "messages": messages,
+                "pending_action": pending,
+                "steps": steps + 1,
+                "reply": None,
+                "retrieval": retrieval,
+            }
         messages.append({"role": "user", "content": results})
-        return {"messages": messages, "steps": steps + 1, "pending_action": None, "reply": None}
+        return {
+            "messages": messages,
+            "steps": steps + 1,
+            "pending_action": None,
+            "reply": None,
+            "retrieval": retrieval,
+        }
 
     async def confirm(state: TurnState) -> dict[str, Any]:
         # NOTE: on resume LangGraph re-runs this node from the top, so everything
@@ -541,34 +609,49 @@ def build_graph(deps: GraphDeps, checkpointer: BaseCheckpointSaver):
             "out_of_scope": "chitchat",
         }.get(state["intent"], "order_agent")
 
-    def after_order_agent(
-        state: TurnState,
-    ) -> Literal["confirm", "order_agent", "save_memory", "token_limit"]:
+    agent_node = "order_agent" if deps.architecture == "routed" else "agent"
+
+    def after_agent(state: TurnState) -> str:
         if state.get("over_budget"):
             return "token_limit"
         if state.get("pending_action"):
             return "confirm"
         if state.get("reply") is not None:
             return "save_memory"
-        return "order_agent"
+        return agent_node
 
     graph = StateGraph(TurnState)
-    graph.add_node("router", router)
-    graph.add_node("order_agent", order_agent)
     graph.add_node("confirm", confirm)
+    graph.add_node("token_limit", token_limit)
+    graph.add_node("save_memory", save_memory)
+    graph.add_edge("token_limit", "save_memory")
+    graph.add_edge("save_memory", END)
+    agent_targets = ["confirm", agent_node, "save_memory", "token_limit"]
+
+    if deps.architecture == "single":
+        graph.add_node("screen", screen_only)
+        graph.add_node("agent", tool_agent(SINGLE_AGENT_PROMPT, SINGLE_AGENT_TOOLS, "single_agent"))
+        graph.add_edge(START, "screen")
+        graph.add_conditional_edges(
+            "screen",
+            lambda s: "token_limit" if s["intent"] == "token_limit" else "agent",
+            ["agent", "token_limit"],
+        )
+        graph.add_conditional_edges("agent", after_agent, agent_targets)
+        graph.add_edge("confirm", "agent")
+        return graph.compile(checkpointer=checkpointer)
+
+    graph.add_node("router", router)
+    graph.add_node("order_agent", tool_agent(ORDER_AGENT_PROMPT, ORDER_AGENT_TOOLS, "order_agent"))
     graph.add_node("knowledge_agent", knowledge_agent)
     graph.add_node("chitchat", chitchat)
     graph.add_node("handoff", handoff)
-    graph.add_node("token_limit", token_limit)
-    graph.add_node("save_memory", save_memory)
 
     graph.add_edge(START, "router")
     graph.add_conditional_edges("router", route_intent)
-    graph.add_conditional_edges("order_agent", after_order_agent)
+    graph.add_conditional_edges("order_agent", after_agent, agent_targets)
     graph.add_edge("confirm", "order_agent")
     graph.add_edge("knowledge_agent", "save_memory")
     graph.add_edge("chitchat", "save_memory")
     graph.add_edge("handoff", "save_memory")
-    graph.add_edge("token_limit", "save_memory")
-    graph.add_edge("save_memory", END)
     return graph.compile(checkpointer=checkpointer)

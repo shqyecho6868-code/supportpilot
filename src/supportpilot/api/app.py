@@ -32,7 +32,7 @@ from supportpilot.graph.builder import _action_log, pending_turn_record
 from supportpilot.kb import RetrievalConfig, Retriever
 from supportpilot.llm import LLMClient, build_llm
 from supportpilot.llm.usage import metered
-from supportpilot.longterm import BackgroundTasks, LongTermMemory, build_long_term_memory
+from supportpilot.longterm import BackgroundTasks, LongTermMemory, build_long_term_memory, worth_remembering
 from supportpilot.mcp_server import build_mcp_server
 from supportpilot.memory import ConversationMemory, SessionOwnershipError
 from supportpilot.observability import configure_tracing
@@ -94,6 +94,7 @@ def create_app(
                 confirmation_ttl_seconds=settings.confirmation_ttl_seconds,
                 injection_guard=settings.injection_guard,
                 long_term=lt_memory,
+                architecture=settings.agent_architecture,
             )
             background = BackgroundTasks()
             app.state.ctx = AppContext(
@@ -171,9 +172,14 @@ def create_app(
             exchange = [{"role": "user", "content": user_message}, {"role": "assistant", "content": reply}]
             if actions:
                 exchange[1]["content"] = f"{reply}\n(Actions taken: {'; '.join(actions)})"
-            ctx.background.spawn(
-                ctx.long_term.remember(user_id, exchange, {"session_id": session_id, "thread_id": thread_id})
-            )
+            if ctx.settings.long_term_memory_gate == "all" or worth_remembering(user_message, actions):
+                remember = ctx.long_term.remember(
+                    user_id, exchange, {"session_id": session_id, "thread_id": thread_id}
+                )
+                if ctx.settings.long_term_memory_sync:
+                    await remember
+                else:
+                    ctx.background.spawn(remember)
         usage = {
             "turn_tokens": meter.total_tokens,
             "turn_cost_usd": round(meter.cost, 6),

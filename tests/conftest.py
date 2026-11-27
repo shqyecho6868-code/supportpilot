@@ -64,6 +64,9 @@ def settings() -> Settings:
         anthropic_api_key=None,
         long_term_memory=False,
         langfuse_enabled=False,
+        # Most flow tests exercise the routed graph (router, specialist agents); the default
+        # single-agent graph is covered in tests/test_single_agent.py.
+        agent_architecture="routed",
     )
 
 

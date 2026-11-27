@@ -73,7 +73,7 @@ def metered_client(api_key: str | None, name: str) -> anthropic.AsyncAnthropic:
     Ragas (through instructor) calls ``client.messages.create`` itself, so the wrapper sits on the
     client rather than around our own calls.
     """
-    client = anthropic.AsyncAnthropic(api_key=api_key)
+    client = anthropic.AsyncAnthropic(api_key=api_key, timeout=120.0)  # a hung request must not stall a run
     original = client.messages.create
 
     async def create(*args: Any, **kwargs: Any):
@@ -89,6 +89,11 @@ def metered_client(api_key: str | None, name: str) -> anthropic.AsyncAnthropic:
     return client
 
 
+def _tool_line(t: dict) -> str:
+    outcome = "ERROR" if t["is_error"] else "ok"
+    return f"{t['name']}({json.dumps(t['args'])}) -> {outcome}: {t['result'][:8000]}"
+
+
 class TaskJudge:
     def __init__(self, model: str, api_key: str | None = None):
         self.model = model
@@ -97,19 +102,30 @@ class TaskJudge:
     async def grade(
         self, *, message: str, history: list[dict[str, str]], reference: str, record: dict
     ) -> dict:
-        transcript = "\n".join(f"{m['role']}: {m['content']}" for m in history)
-        tools = [
-            f"- {t['name']}({json.dumps(t['args'])}) -> "
-            f"{'ERROR' if t['is_error'] else 'ok'}: {t['result'][:8000]}"
-            for t in record["tools"]
-        ]
+        lines = [f"{m['role']}: {m['content']}" for m in history]
+        final_tools = record["tools"]
         events = []
+        if live := record.get("turns"):
+            # A conversation run live: earlier turns, with what really ran in them, are graded too.
+            for n, turn in enumerate(live[:-1], start=1):
+                lines.append(f"customer (turn {n}): {turn['message']}")
+                lines += [f"  [tool] {_tool_line(t)}" for t in turn["tools"]]
+                if turn["confirmation"]:
+                    lines.append("  [system] confirmation prompt shown; the customer approved it")
+                lines.append(f"assistant (turn {n}): {turn['reply']}")
+            final_tools = live[-1]["tools"]
+            events.append(
+                f"This conversation ran live for {len(live)} turns; the reference describes all of them. "
+                "Grade the whole conversation: earlier assistant turns count as much as the last one."
+            )
+        tools = [f"- {_tool_line(t)}" for t in final_tools]
         if record.get("confirmation"):
             events.append(
                 "Before the change tool ran, the system showed the customer a confirmation prompt with "
                 "the change, and the customer approved it there. This is the confirmation step; the "
                 "assistant itself does not need to ask again."
             )
+        transcript = "\n".join(lines)
         body = (
             f"<earlier_conversation>\n{transcript or '(none)'}\n</earlier_conversation>\n"
             f"<customer_message>\n{message}\n</customer_message>\n"

@@ -14,6 +14,17 @@ SUBSETS_DIR = EVALS_DIR / "subsets"
 KNOWLEDGE_CATEGORIES = frozenset({"policy", "policy_multi_doc", "policy_multi_turn"})
 SECURITY_CATEGORIES = frozenset({"cross_user", "prompt_injection"})
 
+# The seven ticket types every case is labelled with (the "type" field), in report order.
+CASE_TYPES = (
+    "order_lookup",
+    "address_change",
+    "policy",
+    "after_sales",
+    "mixed_intent",
+    "adversarial",
+    "smalltalk_handoff",
+)
+
 
 @dataclass(frozen=True)
 class Case:
@@ -23,10 +34,15 @@ class Case:
     message: str
     reference: str
     expected_route: tuple[str, ...]
+    type: str = ""  # one of CASE_TYPES
     expected_tools: tuple[str, ...] = ()  # each entry may be "a|b": at least one of them must run
     forbidden_tools: tuple[str, ...] = ()
     expected_sources: tuple[str, ...] = ()  # relevant chunk ids, for retrieval metrics
-    history: tuple[dict[str, str], ...] = ()
+    history: tuple[dict[str, str], ...] = ()  # earlier turns given as text (not run)
+    # Earlier customer messages that are run live through the graph before ``message``, in the
+    # same session, so their tool calls and confirmations really happen.
+    turns: tuple[str, ...] = ()
+    turn_routes: tuple[tuple[str, ...], ...] = ()  # accepted routes for each of ``turns``
     expect_ticket: bool | None = False  # None: a ticket is acceptable either way
     expect_confirmation: bool = False
     expect_address: dict[str, str] | None = None
@@ -42,12 +58,26 @@ class Case:
         return bool(self.expected_sources)
 
     @property
+    def messages(self) -> tuple[str, ...]:
+        """Every customer message run live, in order (the last one is ``message``)."""
+        return (*self.turns, self.message)
+
+    @property
+    def is_multi_turn(self) -> bool:
+        return bool(self.turns or self.history)
+
+    @property
     def is_security(self) -> bool:
         return self.category in SECURITY_CATEGORIES and bool(self.protected_orders or self.secrets)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Case":
         route = d["expected_route"]
+        if d.get("type") not in CASE_TYPES:
+            raise ValueError(f"case {d['id']}: type must be one of {CASE_TYPES}")
+        turn_routes = tuple((r,) if isinstance(r, str) else tuple(r) for r in d.get("turn_routes", []))
+        if turn_routes and len(turn_routes) != len(d.get("turns", [])):
+            raise ValueError(f"case {d['id']}: turn_routes needs one entry per turn")
         return cls(
             id=d["id"],
             category=d["category"],
@@ -55,10 +85,13 @@ class Case:
             message=d["message"],
             reference=d["reference"],
             expected_route=tuple(route) if isinstance(route, list) else (route,),
+            type=d["type"],
             expected_tools=tuple(d.get("expected_tools", [])),
             forbidden_tools=tuple(d.get("forbidden_tools", [])),
             expected_sources=tuple(d.get("expected_sources", [])),
             history=tuple(d.get("history", [])),
+            turns=tuple(d.get("turns", [])),
+            turn_routes=turn_routes,
             expect_ticket=d.get("expect_ticket", d["category"] == "handoff"),
             expect_confirmation=d.get("expect_confirmation", False),
             expect_address=d.get("expect_address"),
