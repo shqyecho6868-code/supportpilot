@@ -1,39 +1,24 @@
-user=cust_001 session=ad6b80773bf3  (commands: /confirm <thread_id> approve|reject, /quit)
+user=cust_001 session=d468f55b8e4d  (commands: /confirm <thread_id> approve|reject, /quit)
 
 you> Where is my order ORD-1002?
-bot> [route: order] Your order ORD-1002 has shipped via UPS.
-
-- Items: 2 × Ceramic Coffee Mug, total $31.98 USD
-- Tracking number: 1Z999AA10123456784
-- Shipping to: 742 Evergreen Terrace, Springfield, OR 97477, US
-- Order placed: November 23, 2026
-
-You can use the tracking number on the UPS website to see the latest delivery updates.
-[tokens: turn 5518, session 5518]
+bot> Order ORD-1002 has shipped. It contains 2 Ceramic Coffee Mugs (total $31.98 USD) and is with UPS under tracking number 1Z999AA10123456784. It is addressed to 742 Evergreen Terrace, Springfield, OR 97477, US.
+[tokens: turn 7397, session 7397]
 
 you> Please change the shipping address of ORD-1001 to 500 Market St, San Francisco, CA 94105, US
-bot> [route: order] 
-[tokens: turn 6774, session 12292]
+bot> 
+[tokens: turn 7975, session 15372]
 
 [confirmation required]
   order:   ORD-1001
   current: 742 Evergreen Terrace, Springfield, OR 97477, US
   new:     500 Market St, San Francisco, CA 94105, US
-  expires: 2026-11-27T01:30:51+00:00
-  thread:  ad6b80773bf3:12bfe1c9bb47
+  expires: 2026-11-27T18:32:59+00:00
+  thread:  d468f55b8e4d:e39eecf1e509
 approve / reject / skip? approve
-bot> Your order ORD-1001 (Wireless Headphones, $129.99 USD) now ships to:
-
-500 Market St, San Francisco, CA 94105, US
-
-The previous address was 742 Evergreen Terrace, Springfield, OR 97477, US. The order is still pending, so it hasn't shipped yet.
+bot> The shipping address for ORD-1001 is now 500 Market St, San Francisco, CA 94105, US. It was 742 Evergreen Terrace, Springfield, OR 97477. The order is still pending, so it hasn't shipped yet.
 
 you> What's the shipping address on ORD-1001 now?
-bot> [route: order] The shipping address on ORD-1001 is currently:
-
-500 Market St, San Francisco, CA 94105, US
-
-The order is still pending and hasn't shipped yet.
-[tokens: turn 7243, session 22935]
+bot> The shipping address on ORD-1001 is 500 Market St, San Francisco, CA 94105, US. The order is still pending.
+[tokens: turn 8065, session 27917]
 
 you> /quit

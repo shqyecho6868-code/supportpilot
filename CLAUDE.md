@@ -25,6 +25,8 @@ uv run python scripts/ingest_kb.py   # (re)index kb/policies; new chunks call Ha
 uv run supportpilot-eval compare     # full eval vs. evals/baseline.json, exit 1 on a reproducible regression
 uv run supportpilot-eval compare --subset ci --baseline evals/baseline-ci.json   # the PR gate (~$0.02)
 uv run supportpilot-eval retrieval-sweep    # rerankers x top_k, retrieval metrics only (no grader)
+uv run supportpilot-eval run --architecture routed   # the router + specialists design (P5 comparison)
+uv run python scripts/memory_bench.py --variant cached   # mem0 cost / latency / recall (~$0.1-0.3 per variant)
 uv run python scripts/turn_stats.py --send  # per-turn tokens / cost / p50-p95 latency via the API, read from Langfuse
 uv run --with pillow python scripts/record_demo.py   # re-record docs/demo.gif (then reset_db.py)
 ```
@@ -35,7 +37,8 @@ CI's eval gate reranks with `jinaai/jina-reranker-v1-tiny-en` (`RERANKER_MODEL`)
 - `src/supportpilot/mcp_server/` -- MCP tools. Identity comes from request `_meta`, never from tool args.
 - `src/supportpilot/tools.py` -- ToolGateway: the only place tools are executed; injects identity and
   idempotency keys, and lists the tools that need human confirmation.
-- `src/supportpilot/graph/` -- LangGraph state, prompts and nodes.
+- `src/supportpilot/graph/` -- LangGraph state, prompts and nodes. Default `AGENT_ARCHITECTURE=single`
+  (one agent, every tool); `routed` is the router + specialists design it was compared with.
 - `src/supportpilot/llm/` -- `AnthropicLLM` (real: retries, timeout, fallback model) and `RuleBasedLLM`
   (deterministic test double); `usage.py` meters tokens and cost per turn.
 - `src/supportpilot/guard.py` -- prompt-injection scan of customer messages, tool results, memories.
@@ -43,8 +46,9 @@ CI's eval gate reranks with `jinaai/jina-reranker-v1-tiny-en` (`RERANKER_MODEL`)
 - `src/supportpilot/observability.py` -- Langfuse tracing (no-op without keys).
 - `src/supportpilot/api/` -- FastAPI app.
 - `src/supportpilot/kb/` -- policy chunking, Contextual Retrieval, fastembed models, hybrid `Retriever`.
-- `src/supportpilot/evals/` -- eval runner, metrics, judges (`supportpilot-eval`); cases in `evals/golden.jsonl`,
-  CI subset in `evals/subsets/ci.txt`.
+- `src/supportpilot/evals/` -- eval runner, metrics, judges (`supportpilot-eval`); cases in `evals/golden.jsonl`
+  (every case has one of seven `type`s; `turns` are run live), CI subset in `evals/subsets/ci.txt`,
+  memory recall scenarios in `evals/memory.jsonl`.
 - `.github/workflows/ci.yml` -- tests on push/PR; eval gate on PRs (secret `ANTHROPIC_API_KEY`).
 - `kb/policies/` -- policy documents (source of truth); `kb/contexts.json` -- cached chunk contexts.
 - `db/init/` -- schema and seed SQL. `tests/` -- pytest.
