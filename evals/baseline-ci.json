@@ -1,5 +1,5 @@
 {
-  "date": "2026-11-26T20:38:04+00:00",
+  "date": "2026-11-27T01:21:08+00:00",
   "n_cases": 17,
   "models": {
     "agent": "claude-haiku-5-5",
@@ -7,7 +7,7 @@
     "judge": "claude-haiku-5-5",
     "ragas": "claude-haiku-5-5",
     "embedding": "BAAI/bge-small-en-v1.5",
-    "reranker": "BAAI/bge-reranker-v2-m3",
+    "reranker": "jinaai/jina-reranker-v1-tiny-en",
     "chunk_context": "claude-haiku-5-5"
   },
   "retrieval_config": {
@@ -20,7 +20,7 @@
     "candidates": 20,
     "rrf_k": 60,
     "embedding_model": "BAAI/bge-small-en-v1.5",
-    "reranker_model": "BAAI/bge-reranker-v2-m3"
+    "reranker_model": "jinaai/jina-reranker-v1-tiny-en"
   },
   "agentic_rag": false,
   "subset": "ci",
@@ -45,15 +45,16 @@
   ],
   "metrics": {
     "retrieval.hit_rate@5": 1.0,
-    "retrieval.mrr": 0.9285714285714286,
-    "retrieval.recall@5": 0.9285714285714286,
-    "answer.faithfulness": 0.8612244897959184,
-    "answer.factual_correctness": 0.7999999999999999,
-    "answer.answer_relevancy": 0.7619387678947352,
+    "retrieval.mrr": 0.8333333333333333,
+    "retrieval.recall@5": 0.8571428571428571,
+    "answer.faithfulness": 0.8702844774273346,
+    "answer.factual_correctness": 0.5942857142857143,
+    "answer.answer_relevancy": 0.7800803908991691,
     "answer.citation_rate": 1.0,
+    "answer.numeric_accuracy": 0.8333333333333334,
     "agent.routing_accuracy": 1.0,
     "agent.tool_call_accuracy": 1.0,
-    "agent.task_completion_rate": 1.0,
+    "agent.task_completion_rate": 0.9411764705882353,
     "agent.unauthorized_block_rate": 1.0,
     "agent.false_ticket_rate": 0.0,
     "guard.injection_detection_rate": 1.0,

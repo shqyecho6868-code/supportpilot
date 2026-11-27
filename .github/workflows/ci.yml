@@ -43,7 +43,8 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: .cache/fastembed
-          key: fastembed-${{ hashFiles('src/supportpilot/config.py') }}
+          # Keyed on the model names, not on a source file, so unrelated edits keep the cache.
+          key: fastembed-bge-small-en-v1.5-bge-reranker-v2-m3
       - name: Ruff
         run: uv run ruff check . && uv run ruff format --check .
       - name: Tests (LLM_PROVIDER=rule_based, no API calls)
@@ -57,7 +58,7 @@ jobs:
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     needs: test
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     services:
       postgres:
         image: paradedb/paradedb:0.27.0-pg17
@@ -76,6 +77,12 @@ jobs:
           --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 3s --health-retries 30
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_MODEL: claude-haiku-5-5  # CI has no .env; keep the main model on Haiku
+      # bge-reranker-v2-m3 takes ~20 s per query on the 4-vCPU runner (13 searches per run); this
+      # one takes well under a second and keeps the needed passages in the top 5 (see
+      # docs/eval-report.md). The gate compares against evals/baseline-ci.json, which was produced
+      # with the same reranker; reported numbers come from local runs with v2-m3.
+      RERANKER_MODEL: jinaai/jina-reranker-v1-tiny-en
       LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
       LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
       LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
@@ -93,7 +100,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: .cache/fastembed
-          key: fastembed-${{ hashFiles('src/supportpilot/config.py') }}
+          key: fastembed-bge-small-en-v1.5-jina-reranker-v1-tiny-en
       - name: Compare the CI subset with its baseline (exit 1 on a reproducible >5pp regression)
         run: >-
           uv run supportpilot-eval compare --subset ci --baseline evals/baseline-ci.json

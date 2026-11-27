@@ -1,15 +1,14 @@
 # SupportPilot -- project conventions
 
-## Language
-- Everything in the repo is English: code, comments, docstrings, commit messages, docs, prompts, mock data.
-- Talk to the user in Chinese (keep technical terms such as Bean, Docker, API in English).
+## Language (highest priority)
+- ALWAYS reply to the user in Simplified Chinese (简体中文), in every message, no matter how much English code, logs or docs are in context. Keep technical terms (API, Docker, MCP) in English.
+- Everything written into the repo is English: code, comments, docstrings, commit messages, docs, prompts, mock data.
 
 ## Stack
 Python 3.12 + uv, FastAPI (async, SSE), LangGraph with the Postgres checkpointer, official MCP Python SDK
 (v2: `mcp.server.mcpserver.MCPServer`, `mcp.Client`), ParadeDB (Postgres + pg_search + pgvector), Redis,
-pytest. The only model provider is Claude via the official `anthropic` SDK; the main model is Haiku
-(`claude-haiku-5-5`); routine evaluation is graded by Haiku and the one-off deep evaluation by Sonnet
-(`claude-sonnet-5-5`), and the key comes from `ANTHROPIC_API_KEY`.
+pytest. The only model provider is Claude via the official `anthropic` SDK.
+The production default is Sonnet (`claude-sonnet-5-5`) with automatic fallback to Haiku (`claude-haiku-5-5`). Local dev and CI set the main model to Haiku via `.env` to save cost. Routine evals are graded by Haiku; the one-off deep evaluation by Sonnet. The key comes from `ANTHROPIC_API_KEY`.
 
 ## Commands
 ```bash
@@ -26,7 +25,11 @@ uv run python scripts/ingest_kb.py   # (re)index kb/policies; new chunks call Ha
 uv run supportpilot-eval compare     # full eval vs. evals/baseline.json, exit 1 on a reproducible regression
 uv run supportpilot-eval compare --subset ci --baseline evals/baseline-ci.json   # the PR gate (~$0.02)
 uv run supportpilot-eval retrieval-sweep    # rerankers x top_k, retrieval metrics only (no grader)
+uv run python scripts/turn_stats.py --send  # per-turn tokens / cost / p50-p95 latency via the API, read from Langfuse
+uv run --with pillow python scripts/record_demo.py   # re-record docs/demo.gif (then reset_db.py)
 ```
+CI's eval gate reranks with `jinaai/jina-reranker-v1-tiny-en` (`RERANKER_MODEL`) against
+`evals/baseline-ci.json`; regenerate that baseline with the same env var. Reported numbers use v2-m3.
 
 ## Layout
 - `src/supportpilot/mcp_server/` -- MCP tools. Identity comes from request `_meta`, never from tool args.
@@ -61,3 +64,4 @@ uv run supportpilot-eval retrieval-sweep    # rerankers x top_k, retrieval metri
   for `evals/baseline.json`, and re-run `baseline --subset ci --baseline evals/baseline-ci.json`.
 - After editing `kb/policies/*.md`, re-run `scripts/ingest_kb.py` and commit the updated `kb/contexts.json`
   (the offline tests index the KB from it), then check `evals/golden.jsonl` source labels still hold.
+- If an API-calling run is estimated to cost more than $1, stop and ask the user first.

@@ -10,6 +10,16 @@ Reliability
   call is repeated once on ``fallback_model`` (Haiku). A streamed reply falls back only if no
   text has reached the customer yet, so a reply is never emitted twice.
 * Errors that a retry cannot fix (400, 401, 403) are raised immediately.
+
+Refusals
+--------
+A policy decline is not an error: it is an HTTP 200 with ``stop_reason == "refusal"``. On models
+that support it (Sonnet 5.5, Opus 5.5, Fable) every request opts into the API's server-side
+fallback (``fallbacks: "default"``): the API re-runs a declined request on the fallback model it
+picks for the refusal category, inside the same call. Sonnet 5.5 falls back to Sonnet 5 for
+``cyber`` and ``frontier_llm`` declines; other categories stay declined, and a refusal of the
+whole chain still ends in ``REFUSAL_REPLY``. Haiku has no server-side fallback, so dev and CI
+(Haiku) use the plain endpoint.
 """
 
 import asyncio
@@ -41,6 +51,9 @@ _INTENT_SCHEMA = {
     "additionalProperties": False,
 }
 
+SERVER_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+_SERVER_FALLBACK_MODELS = ("claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5", "claude-fable-5")
+
 _TRANSIENT = (
     anthropic.RateLimitError,
     anthropic.InternalServerError,  # 5xx, including 529 overloaded
@@ -59,6 +72,46 @@ def thinking_off(model: str) -> dict[str, Any] | None:
     if model.startswith("claude-sonnet-5-5"):
         return {"type": "between_tools"}
     return {"type": "disabled"}
+
+
+def supports_server_fallback(model: str) -> bool:
+    return model.startswith(_SERVER_FALLBACK_MODELS)
+
+
+def served_by_fallback(response: Any) -> str | None:
+    """The model that served the reply if a server-side fallback ran, else None."""
+    iterations = getattr(getattr(response, "usage", None), "iterations", None) or []
+    if any(getattr(it, "type", None) == "fallback_message" for it in iterations):
+        return getattr(response, "model", None)
+    return None
+
+
+def _assistant_content(blocks: list[Any]) -> list[dict[str, Any]]:
+    """Response blocks in the form they are sent back (and acted on) in the next request.
+
+    After a mid-output server-side fallback, the declined model's thinking and tool_use blocks
+    before the last ``fallback`` block are left out (its tool calls are never run), and the
+    ``fallback`` block stays where it was: the API uses its position to validate the turn.
+    """
+    params = [_to_param(b) for b in blocks]
+    boundary = max((i for i, b in enumerate(params) if b["type"] == "fallback"), default=-1)
+    dropped = {"thinking", "redacted_thinking", "tool_use"}
+    return [b for i, b in enumerate(params) if i >= boundary or b["type"] not in dropped]
+
+
+def _without_fallback_blocks(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip ``fallback`` markers for a model called without the fallback beta (it rejects them)."""
+
+    def is_marker(block: Any) -> bool:
+        return isinstance(block, dict) and block.get("type") == "fallback"
+
+    out = []
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list) and any(is_marker(b) for b in content):
+            m = {**m, "content": [b for b in content if not is_marker(b)]}
+        out.append(m)
+    return out
 
 
 def _is_transient(exc: BaseException) -> bool:
@@ -86,8 +139,8 @@ def _to_param(block: Any) -> dict[str, Any]:
             return {"type": "thinking", "thinking": block.thinking, "signature": block.signature}
         case "redacted_thinking":
             return {"type": "redacted_thinking", "data": block.data}
-        case _:
-            return block.model_dump(mode="json", exclude_none=True)
+        case _:  # e.g. "fallback": by_alias keeps its "from" key
+            return block.model_dump(mode="json", by_alias=True, exclude_none=True)
 
 
 class AnthropicLLM:
@@ -102,6 +155,7 @@ class AnthropicLLM:
         max_retries: int = 3,
         retry_base_delay: float = 0.5,
         retry_max_delay: float = 8.0,
+        server_fallback: bool = True,
         client: Any | None = None,
     ):
         # With api_key=None the SDK resolves credentials from the environment.
@@ -112,7 +166,9 @@ class AnthropicLLM:
         self._max_retries = max_retries
         self._base_delay = retry_base_delay
         self._max_delay = retry_max_delay
+        self._server_fallback = server_fallback
         self.fallbacks_used = 0  # observable in tests and logs
+        self.server_fallbacks_used = 0  # replies served by the API's server-side fallback model
 
     # -- retry / fallback -------------------------------------------------------------------------
 
@@ -162,24 +218,46 @@ class AnthropicLLM:
             ):
                 return await self._with_retries(name, fallback, fn)
 
+    def _messages_api(self, model: str, params: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+        """The messages resource to call and the final params: opts into server-side fallback when
+        the model supports it, else the plain endpoint (which rejects ``fallback`` blocks)."""
+        if self._server_fallback and supports_server_fallback(model):
+            opt_in = {"betas": [SERVER_FALLBACK_BETA], "fallbacks": "default"}
+            return self._client.beta.messages, {**params, **opt_in}
+        if "messages" in params:
+            params = {**params, "messages": _without_fallback_blocks(params["messages"])}
+        return self._client.messages, params
+
+    def _meter(self, name: str, model: str, response: Any) -> dict[str, Any]:
+        """Record usage per model that ran; return the Langfuse fields for the generation."""
+        usages = CallUsage.per_model(model, response.usage)
+        for usage in usages:
+            record(usage)
+        details: dict[str, int] = {}
+        cost: dict[str, float] = {}
+        for usage in usages:
+            for k, v in usage.usage_details().items():
+                details[k] = details.get(k, 0) + v
+            for k, v in usage.cost().items():
+                cost[k] = cost.get(k, 0.0) + v
+        metadata: dict[str, Any] = {"stop_reason": response.stop_reason}
+        if served := served_by_fallback(response):
+            self.server_fallbacks_used += 1
+            metadata["server_fallback"] = served
+            log.warning("%s: %s declined; served by server-side fallback %s", name, model, served)
+        return {"usage_details": details, "cost_details": cost, "metadata": metadata}
+
     async def _create(self, name: str, model: str, **params: Any) -> Any:
         """One non-streaming request, traced and metered."""
         with get_tracer().generation(
             name, model=model, input=preview(params.get("messages", [])), model_parameters=_params_of(params)
         ) as gen:
             started = time.monotonic()
-            response = await self._client.messages.create(model=model, **params)
-            usage = CallUsage.from_response(model, response.usage)
-            record(usage)
-            gen.update(
-                output="".join(getattr(b, "text", "") for b in response.content),
-                usage_details=usage.usage_details(),
-                cost_details=usage.cost(),
-                metadata={
-                    "stop_reason": response.stop_reason,
-                    "seconds": round(time.monotonic() - started, 3),
-                },
-            )
+            api, params = self._messages_api(model, params)
+            response = await api.create(model=model, **params)
+            fields = self._meter(name, model, response)
+            fields["metadata"]["seconds"] = round(time.monotonic() - started, 3)
+            gen.update(output="".join(getattr(b, "text", "") for b in response.content), **fields)
             return response
 
     # -- public API -------------------------------------------------------------------------------
@@ -286,30 +364,27 @@ class AnthropicLLM:
             ) as gen:
                 started = time.monotonic()
                 first_token: float | None = None
-                async with self._client.messages.stream(
-                    model=model,
-                    max_tokens=16000,
-                    system=system_blocks,
-                    messages=messages,
-                    **({"tools": tools} if tools else {}),
-                    output_config={"effort": "low"},
-                ) as stream:
+                api, params = self._messages_api(
+                    model,
+                    {
+                        "max_tokens": 16000,
+                        "system": system_blocks,
+                        "messages": messages,
+                        **({"tools": tools} if tools else {}),
+                        "output_config": {"effort": "low"},
+                    },
+                )
+                async with api.stream(model=model, **params) as stream:
                     async for text in stream.text_stream:
                         first_token = first_token or time.monotonic()
                         emit(text)
                     final = await stream.get_final_message()
-                usage = CallUsage.from_response(model, final.usage)
-                record(usage)
-                gen.update(
-                    output=[_to_param(b) for b in final.content if b.type != "thinking"],
-                    usage_details=usage.usage_details(),
-                    cost_details=usage.cost(),
-                    metadata={
-                        "stop_reason": final.stop_reason,
-                        "seconds": round(time.monotonic() - started, 3),
-                        "time_to_first_token": round(first_token - started, 3) if first_token else None,
-                    },
+                fields = self._meter(name, model, final)
+                fields["metadata"].update(
+                    seconds=round(time.monotonic() - started, 3),
+                    time_to_first_token=round(first_token - started, 3) if first_token else None,
                 )
+                gen.update(output=[_to_param(b) for b in final.content if b.type != "thinking"], **fields)
                 return final
 
         final = await self._call(name, self._model, run, can_fall_back=lambda: not emitted)
@@ -317,7 +392,7 @@ class AnthropicLLM:
             on_text(REFUSAL_REPLY)
             return LLMTurn(content=[{"type": "text", "text": REFUSAL_REPLY}], stop_reason="refusal")
         # Thinking blocks go back unchanged; after a fallback the API ignores blocks the other model wrote.
-        return LLMTurn(content=[_to_param(b) for b in final.content], stop_reason=final.stop_reason)
+        return LLMTurn(content=_assistant_content(final.content), stop_reason=final.stop_reason)
 
 
 def _params_of(params: dict[str, Any]) -> dict[str, Any]:

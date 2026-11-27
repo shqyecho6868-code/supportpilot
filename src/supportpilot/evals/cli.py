@@ -46,6 +46,7 @@ from supportpilot.evals.metrics import (
     retrieval_scores,
     tools_ok,
 )
+from supportpilot.evals.numbers import check_numbers
 from supportpilot.evals.runner import AgentRunner, answer_with, dumps, prepare_database, rewrite_for_retrieval
 from supportpilot.kb import RetrievalConfig, Retriever
 from supportpilot.llm.anthropic_llm import AnthropicLLM
@@ -125,6 +126,7 @@ def _llm(args, settings: Settings) -> AnthropicLLM:
         settings.anthropic_api_key,
         fast_model=settings.fast_model,
         fallback_model=settings.fallback_model,
+        server_fallback=settings.server_side_fallback,
         timeout=settings.llm_timeout_seconds,
         max_retries=settings.llm_max_retries,
     )
@@ -206,7 +208,16 @@ async def cmd_ablation(args, settings: Settings) -> int:
 
 async def full_eval(args, settings: Settings) -> dict[str, Any]:
     cases = _select_cases(args)
+    timings: dict[str, float] = {}
+    clock = time.monotonic()
+
+    def lap(stage: str) -> None:
+        nonlocal clock
+        timings[stage] = round(time.monotonic() - clock, 1)
+        clock = time.monotonic()
+
     url = await prepare_database(settings.database_url, settings.fast_model, settings.embedding_model)
+    lap("prepare_db")
     llm = _llm(args, settings)
     cfg = RetrievalConfig.from_settings(settings)
     agentic = _agentic(args, settings)
@@ -220,6 +231,7 @@ async def full_eval(args, settings: Settings) -> dict[str, Any]:
         retrieval_metrics, retrieval_details = await retrieval_eval(Retriever(pool), cfg, knowledge, queries)
     finally:
         await pool.close()
+    lap("retrieval")
 
     # 2. Every case through the real graph (sequential: each case resets the order tables).
     runner = AgentRunner(
@@ -241,6 +253,7 @@ async def full_eval(args, settings: Settings) -> dict[str, Any]:
             f"  {case.id:9s} route={record['route']!s:13s} tools={[t['name'] for t in record['tools']]}",
             flush=True,
         )
+    lap("agent_cases")
 
     # 3. LLM grading: task completion for every case, Ragas for knowledge answers.
     judge = TaskJudge(args.judge_model, settings.anthropic_api_key)
@@ -267,6 +280,8 @@ async def full_eval(args, settings: Settings) -> dict[str, Any]:
 
     answered = [r for r in records if by_id[r["id"]].is_knowledge]
     ragas_scores = await gather_limited([lambda r=r: ragas(r) for r in answered], args.concurrency)
+    lap("grading")
+    print("  timings (s): " + ", ".join(f"{k} {v}" for k, v in timings.items()), flush=True)
 
     # 4. Per-case checks and aggregate metrics.
     for record, verdict in zip(records, verdicts, strict=True):
@@ -283,6 +298,7 @@ async def full_eval(args, settings: Settings) -> dict[str, Any]:
     for record, scores in zip(answered, ragas_scores, strict=True):
         record["ragas"] = scores
 
+    numeric = [r for r in records if by_id[r["id"]].expect_numbers]
     security = [r for r in records if by_id[r["id"]].is_security]
     no_ticket_expected = [r for r in records if by_id[r["id"]].expect_ticket is False]
     injection = [r for r in records if by_id[r["id"]].category == "prompt_injection"]
@@ -308,6 +324,12 @@ async def full_eval(args, settings: Settings) -> dict[str, Any]:
         ),
         "answer.answer_relevancy": mean([r["ragas"]["answer_relevancy"] for r in answered if r.get("ragas")]),
         "answer.citation_rate": mean([1.0 if r.get("model_cited") else 0.0 for r in answered]),
+        "answer.numeric_accuracy": mean(
+            [
+                1.0 if r["checks"].get("numbers_present") and r["checks"].get("numbers_supported") else 0.0
+                for r in numeric
+            ]
+        ),
         "agent.routing_accuracy": mean([1.0 if r["route_ok"] else 0.0 for r in records]),
         "agent.tool_call_accuracy": mean([1.0 if r["tools_ok"] else 0.0 for r in records]),
         "agent.task_completion_rate": mean([1.0 if r["task_complete"] else 0.0 for r in records]),
@@ -325,6 +347,7 @@ async def full_eval(args, settings: Settings) -> dict[str, Any]:
         "answer.factual_correctness": len(with_ragas),
         "answer.answer_relevancy": len(with_ragas),
         "answer.citation_rate": len(answered),
+        "answer.numeric_accuracy": len(numeric),
         "agent.routing_accuracy": len(records),
         "agent.tool_call_accuracy": len(records),
         "agent.task_completion_rate": len(records),
@@ -366,6 +389,7 @@ async def full_eval(args, settings: Settings) -> dict[str, Any]:
         "metrics": metrics,
         "metric_counts": counts,
         "info": info,
+        "timings": timings,
         "usage": PROCESS_METER.summary(),
         "records": records,
         "retrieval_details": retrieval_details,
@@ -392,7 +416,25 @@ def _hard_checks(case: Case, record: dict[str, Any]) -> dict[str, bool]:
         checks["address_applied"] = all(
             address.get(k) == v for k, v in case.expect_address.items() if k != "order_id"
         )
+    if case.expect_numbers:
+        numbers = _number_check(case, record)
+        record["numbers"] = {"missing": list(numbers.missing), "unsupported": list(numbers.unsupported)}
+        checks["numbers_present"] = numbers.present
+        checks["numbers_supported"] = numbers.supported
     return checks
+
+
+def _number_check(case: Case, record: dict[str, Any]):
+    """Deterministic arithmetic check, on top of the judge (see evals/numbers.py)."""
+    passages = [h["text"] for h in ((record.get("retrieval") or {}).get("results") or [])]
+    sources = [
+        case.reference,
+        case.message,
+        *(m["content"] for m in case.history),
+        *passages,
+        *(t["result"] for t in record["tools"]),
+    ]
+    return check_numbers(record["reply"], list(case.expect_numbers), sources)
 
 
 def _summary_table(metrics: dict[str, float | None]) -> str:
@@ -507,6 +549,15 @@ async def cmd_compare(args, settings: Settings) -> int:
         )
         return 2
 
+    if baseline["models"].get("reranker", settings.reranker_model) != settings.reranker_model:
+        # Retrieval metrics depend on the reranker: CI gates with a small one against its own baseline.
+        print(
+            f"baseline was produced with reranker={baseline['models']['reranker']}; this run uses "
+            f"{settings.reranker_model}. Set RERANKER_MODEL to match, or pick the matching baseline",
+            file=sys.stderr,
+        )
+        return 2
+
     result = await full_eval(args, settings)
     _save_run(result, args.results_name or "latest")
     first, failed = compare(baseline["metrics"], result["metrics"], result["metric_counts"])
@@ -537,7 +588,17 @@ NEEDED_CHUNKS = {
     "multi-04": ["warranty#electronics-coverage", "membership#warranty-and-rewards-benefits"],
 }
 
-SWEEP_RERANKERS = {"none": None, "base": "BAAI/bge-reranker-base", "v2-m3": "BAAI/bge-reranker-v2-m3"}
+SWEEP_RERANKERS = {
+    "none": None,
+    "base": "BAAI/bge-reranker-base",
+    "v2-m3": "BAAI/bge-reranker-v2-m3",
+    # Smaller candidates for CI, where v2-m3 takes ~20 s per query on the 4-vCPU runner.
+    "v2-m3-int8": "BAAI/bge-reranker-v2-m3-int8",
+    "minilm-l6": "Xenova/ms-marco-MiniLM-L-6-v2",
+    "minilm-l12": "Xenova/ms-marco-MiniLM-L-12-v2",
+    "jina-tiny": "jinaai/jina-reranker-v1-tiny-en",
+    "jina-turbo": "jinaai/jina-reranker-v1-turbo-en",
+}
 
 
 async def cmd_retrieval_sweep(args, settings: Settings) -> int:

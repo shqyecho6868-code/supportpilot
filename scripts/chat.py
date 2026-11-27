@@ -47,6 +47,14 @@ def stream_chat(client: httpx.Client, user: str, session: str, message: str) -> 
     return confirmation
 
 
+def format_address(address) -> str:
+    if not isinstance(address, dict):
+        return str(address)
+    region = f"{address.get('state', '')} {address.get('postal_code', '')}"
+    parts = [address.get("street"), address.get("city"), region, address.get("country")]
+    return ", ".join(p.strip() for p in parts if p and p.strip())
+
+
 def send_confirm(client: httpx.Client, user: str, thread_id: str, decision: str) -> None:
     resp = client.post(
         "/confirm", json={"thread_id": thread_id, "decision": decision}, headers={"X-User-Id": user}
@@ -91,8 +99,8 @@ def main() -> None:
             if confirmation:
                 print("\n[confirmation required]")
                 print(f"  order:   {confirmation['order_id']}")
-                print(f"  current: {confirmation['current_address']}")
-                print(f"  new:     {confirmation['new_address']}")
+                print(f"  current: {format_address(confirmation['current_address'])}")
+                print(f"  new:     {format_address(confirmation['new_address'])}")
                 print(f"  expires: {confirmation.get('expires_at')}")
                 print(f"  thread:  {confirmation['thread_id']}")
                 choice = input("approve / reject / skip? ").strip().lower()
