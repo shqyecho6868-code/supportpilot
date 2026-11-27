@@ -178,13 +178,13 @@ async def _tickets(user_id: str) -> list[str]:
 
 
 async def test_token_limit_ends_the_conversation_politely_and_hands_off(make_client):
-    # A limit of one token: the first turn runs (nothing used yet), the second is over the limit.
-    # Independent of prompt length, which the rule-based stand-in turns into ~1 token per 4 characters.
-    client, _ = await make_client(conversation_token_limit=1)
+    # Deterministic: the session's usage is set directly, independent of prompt length.
+    client, app = await make_client(conversation_token_limit=100_000)
     first = await chat(client, ALICE, "What is the status of ORD-1002?", session_id="s-budget")
     assert first["route"] == "order"
     usage = next(d for n, d in first["events"] if n == "usage")
-    assert usage["session_tokens"] > 0
+    assert 0 < usage["session_tokens"] < 100_000
+    await app.state.ctx.memory.add_tokens("s-budget", 100_000)
 
     second = await chat(client, ALICE, "And ORD-1003?", session_id="s-budget")
     assert second["route"] == "token_limit"
@@ -192,9 +192,22 @@ async def test_token_limit_ends_the_conversation_politely_and_hands_off(make_cli
     assert await _tickets(ALICE) == ["Conversation handed off: token limit reached"]
 
 
-async def test_token_limit_is_per_conversation(make_client):
+async def test_token_limit_reached_mid_turn_hands_off_after_the_current_step(make_client):
+    """The order agent checks the budget between steps, so one runaway turn cannot overspend."""
     client, _ = await make_client(conversation_token_limit=1)
+    turn = await chat(client, ALICE, "What is the status of ORD-1002?")
+    assert turn["route"] == "order"  # the turn starts: nothing was used before it
+    assert "passed it to a human agent" in turn["reply"]
+    assert await _tickets(ALICE) == ["Conversation handed off: token limit reached"]
+
+
+async def test_token_limit_is_per_conversation(make_client):
+    client, app = await make_client(conversation_token_limit=100_000)
     await chat(client, ALICE, "What is the status of ORD-1002?", session_id="s-a")
+    await app.state.ctx.memory.add_tokens("s-a", 100_000)
+    assert (await chat(client, ALICE, "What is the status of ORD-1002?", session_id="s-a"))[
+        "route"
+    ] == "token_limit"
     fresh = await chat(client, ALICE, "What is the status of ORD-1002?", session_id="s-b")
     assert fresh["route"] == "order"
 
