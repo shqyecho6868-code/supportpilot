@@ -96,3 +96,37 @@ def test_small_samples_need_more_than_one_case_to_regress():
     assert status == {"answer.factual_correctness": "ok", "agent.task_completion_rate": "REGRESSED"}
     assert failed
     assert threshold_for(26) == 1.5 / 26 and threshold_for(100) == 0.05 and threshold_for(None) == 0.05
+
+
+def test_expected_numbers_come_from_the_reference():
+    """Every `expect_numbers` quantity is stated in the case's own reference answer."""
+    from supportpilot.evals.numbers import quantities
+
+    labelled = [c for c in load_cases() if c.expect_numbers]
+    assert len(labelled) >= 20
+    for case in labelled:
+        reference = quantities(case.reference)
+        for item in case.expect_numbers:
+            assert quantities(item) and quantities(item) <= reference, (case.id, item)
+
+
+def test_number_check_fails_the_task_even_when_the_judge_passes():
+    from supportpilot.evals.cli import _hard_checks
+
+    case = _case(
+        reference="Refunds post 5 to 10 business days after they are issued.",
+        expect_numbers=["5 to 10 business days"],
+    )
+    record = {
+        "error": None,
+        "reply": "Expect the money in about 7 to 13 business days.",
+        "tools": [],
+        "retrieval": {"results": [{"text": "Card refunds take 5 to 10 business days to post."}]},
+        "tickets_created": 0,
+        "confirmation": None,
+        "orders_before": {},
+        "orders_after": {},
+    }
+    checks = _hard_checks(case, record)
+    assert checks["numbers_present"] is False and checks["numbers_supported"] is False
+    assert record["numbers"] == {"missing": ["5 day", "10 day"], "unsupported": ["7 day", "13 day"]}

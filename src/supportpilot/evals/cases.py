@@ -32,6 +32,8 @@ class Case:
     expect_address: dict[str, str] | None = None
     protected_orders: tuple[str, ...] = ()
     secrets: tuple[str, ...] = ()
+    # Quantities the reply must state ("30 days", "$6.95", "15%"), checked deterministically.
+    expect_numbers: tuple[str, ...] = ()
     raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
     @property
@@ -62,6 +64,7 @@ class Case:
             expect_address=d.get("expect_address"),
             protected_orders=tuple(d.get("protected_orders", [])),
             secrets=tuple(d.get("secrets", [])),
+            expect_numbers=tuple(d.get("expect_numbers", [])),
             raw=d,
         )
 
