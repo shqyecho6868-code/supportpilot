@@ -15,7 +15,7 @@ customer message
        vector: bge-small-en-v1.5 (fastembed, local) + pgvector  RETRIEVAL_VECTOR
        BM25:   ParadeDB pg_search, English stemming             RETRIEVAL_BM25 / RETRIEVAL_BM25_BACKEND
        -> reciprocal rank fusion (k = 60)
-       -> bge-reranker-base cross-encoder (fastembed, local)    RETRIEVAL_RERANK
+       -> bge-reranker-v2-m3 cross-encoder (fastembed, local)   RETRIEVAL_RERANK / RERANKER_MODEL
        -> top 5 passages, each with "source" = "<Document> § <Section>"
   -> answer from the passages only, citing [Document § Section]
 ```
@@ -28,6 +28,7 @@ Every stage is a setting (environment variable or `.env`), read into `RetrievalC
 | `RETRIEVAL_BM25` | `true` | lexical retrieval; fused with the vector list by RRF |
 | `RETRIEVAL_BM25_BACKEND` | `auto` | `paradedb` (pg_search), `postgres_fts` (built-in full-text search), or `auto` |
 | `RETRIEVAL_RERANK` | `true` | cross-encoder rerank of the fused candidates |
+| `RERANKER_MODEL` | `BAAI/bge-reranker-v2-m3` | the cross-encoder; CI's eval gate uses `jinaai/jina-reranker-v1-tiny-en` (see eval-report.md, P4) |
 | `RETRIEVAL_CONTEXTUAL` | `true` | search the contextualized text and embedding instead of the raw chunk |
 | `RETRIEVAL_QUERY_REWRITE` | `true` | rewrite follow-up questions into standalone queries |
 | `RETRIEVAL_TOP_K` / `RETRIEVAL_CANDIDATES` / `RETRIEVAL_RRF_K` | 5 / 20 / 60 | result count, candidates per retriever, RRF constant |

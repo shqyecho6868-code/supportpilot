@@ -25,7 +25,11 @@ uv run python scripts/ingest_kb.py   # (re)index kb/policies; new chunks call Ha
 uv run supportpilot-eval compare     # full eval vs. evals/baseline.json, exit 1 on a reproducible regression
 uv run supportpilot-eval compare --subset ci --baseline evals/baseline-ci.json   # the PR gate (~$0.02)
 uv run supportpilot-eval retrieval-sweep    # rerankers x top_k, retrieval metrics only (no grader)
+uv run python scripts/turn_stats.py --send  # per-turn tokens / cost / p50-p95 latency via the API, read from Langfuse
+uv run --with pillow python scripts/record_demo.py   # re-record docs/demo.gif (then reset_db.py)
 ```
+CI's eval gate reranks with `jinaai/jina-reranker-v1-tiny-en` (`RERANKER_MODEL`) against
+`evals/baseline-ci.json`; regenerate that baseline with the same env var. Reported numbers use v2-m3.
 
 ## Layout
 - `src/supportpilot/mcp_server/` -- MCP tools. Identity comes from request `_meta`, never from tool args.
