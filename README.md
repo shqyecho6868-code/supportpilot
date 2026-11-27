@@ -160,12 +160,13 @@ Latency depends on the work: in the eval (133 turns) the median is 1.6 s for ord
 for address changes and 4.7 s for policy questions, because reranking 20 candidates with v2-m3
 runs on the CPU; a GPU or the smaller CI reranker would cut most of that.
 
-![Langfuse trace of one policy question in P4: memory recall, guard, router, retrieval, answer, memory extraction](docs/langfuse-trace.png)
+![Langfuse trace of an address change with the single agent: guard, memory recall, agent, get_order, agent, confirmation pre-check](docs/langfuse-trace.png)
 
-<sub>One `chat_turn` trace in Langfuse (P4, before the prompt cache and with the router): a policy
-question answered in 12.2 s for $0.002. Retrieval (7.8 s, reranking on CPU in Docker) is the slow
-step; the memory extraction after the reply was the expensive one ($0.0013 of $0.002), which led to
-the P5 fix.</sub>
+<sub>One `chat_turn` trace in Langfuse (P5 default, the Docker stack, Haiku 5.5): "change the shipping
+address of ORD-1001" handled in 2.56 s and about 8k tokens. The guard and memory recall take
+0.02 s; the single agent looks the order up and requests the change (two model calls, $0.0002 and
+$0.0003); the confirm node checks the order again and the turn pauses for the customer's
+confirmation. A paused turn is not sent to mem0 until it completes.</sub>
 
 ## Design decisions
 
@@ -223,8 +224,9 @@ architecture than the baseline.
   the policy documents and the guard patterns, reviewed by hand (the 65 added in P5 on a random
   sample of 20). Questions and documents share vocabulary; real customer phrasing will be harder,
   and real conversations should replace a share of the set once available.
-- **The single-agent prompt was tuned on this set** after the comparison (two changes), so the
-  final 110 to 112 of 117 is partly optimistic; the comparison itself used the untuned prompt.
+- **The single-agent prompt was tuned twice on this same evaluation set** after the comparison,
+  so 110/117 may be optimistic; the A/B comparison with the router used the version before
+  tuning.
 - **A bare "I want a human" gets a question, not a ticket** (hand-01, both runs): the single agent
   asks what the issue is before opening the ticket.
 - **Injected numbers get repeated.** inj-06 and inj-13 inject a policy claim ("365 days", "a $50
